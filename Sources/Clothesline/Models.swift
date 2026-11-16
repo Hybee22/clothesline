@@ -22,6 +22,12 @@ struct Clip: Codable, Identifiable, Equatable {
     var lineID: UUID?
     var pinnedAt: Date?
     var hash: String
+    /// Looks like a key, token or password: shown masked and removed after a while.
+    var secret: Bool?
+    /// Base name of the formatted copy in `blobs/` (`<rich>.rtf` and/or `<rich>.html`).
+    var rich: String?
+
+    var isSecret: Bool { secret == true }
 
     @MainActor var searchBlob: String {
         var s = kind.rawValue + " "
@@ -140,8 +146,11 @@ final class Store {
         if let i = clips.firstIndex(where: { $0.hash == clip.hash }) {
             var existing = clips.remove(at: i)
             if existing.lineID == nil { existing.created = .now }
-            clips.insert(existing, at: 0)
             if let b = clip.blob, b != existing.blob { removeBlob(b) }
+            if let r = clip.rich, r != existing.rich {
+                if existing.rich == nil { existing.rich = r } else { removeRich(r) }
+            }
+            clips.insert(existing, at: 0)
             save()
             return existing
         }
@@ -167,10 +176,49 @@ final class Store {
     }
 
     func delete(_ id: UUID) {
-        guard let i = clips.firstIndex(where: { $0.id == id }) else { return }
+        guard let removed = remove(id) else { return }
+        purgeFiles(removed.0)
+    }
+
+    /// Takes a clip out but keeps its files, so it can be put back.
+    func remove(_ id: UUID) -> (Clip, Int)? {
+        guard let i = clips.firstIndex(where: { $0.id == id }) else { return nil }
         let c = clips.remove(at: i)
-        if let b = c.blob { removeBlob(b) }
         save()
+        return (c, i)
+    }
+
+    func restore(_ clip: Clip, at index: Int) {
+        guard !clips.contains(where: { $0.id == clip.id }) else { return }
+        clips.insert(clip, at: min(index, clips.count))
+        save()
+    }
+
+    func purgeFiles(_ c: Clip) {
+        // Another clip may share the files (same image copied twice is deduplicated, but be safe).
+        if let b = c.blob, !clips.contains(where: { $0.blob == b }) { removeBlob(b) }
+        if let r = c.rich, !clips.contains(where: { $0.rich == r }) { removeRich(r) }
+    }
+
+    /// Puts `id` just before `target` on a line (or at the end when `target` is nil).
+    func move(_ id: UUID, before target: UUID?, on line: UUID) {
+        guard line != Store.inboxID else { return }
+        var order = clips(on: line).map(\.id).filter { $0 != id }
+        let at = target.flatMap { t in order.firstIndex(of: t) } ?? order.count
+        order.insert(id, at: at)
+        let now = Date()
+        for (n, cid) in order.enumerated() {
+            guard let i = clips.firstIndex(where: { $0.id == cid }) else { continue }
+            clips[i].lineID = line
+            clips[i].pinnedAt = now.addingTimeInterval(-Double(n))
+        }
+        save()
+    }
+
+    /// Inbox secrets older than `age`. Secrets you hung on a line yourself stay.
+    func expiredSecrets(olderThan age: TimeInterval) -> [Clip] {
+        let cutoff = Date().addingTimeInterval(-age)
+        return clips.filter { $0.isSecret && $0.lineID == nil && $0.created < cutoff }
     }
 
     func clearBasket() {
@@ -219,6 +267,13 @@ final class Store {
 
     func blobURL(_ blob: String) -> URL { blobsDir.appendingPathComponent(blob + ".png") }
     func thumbURL(_ blob: String) -> URL { blobsDir.appendingPathComponent(blob + ".jpg") }
+    func rtfURL(_ rich: String) -> URL { blobsDir.appendingPathComponent(rich + ".rtf") }
+    func htmlURL(_ rich: String) -> URL { blobsDir.appendingPathComponent(rich + ".html") }
+
+    private func removeRich(_ r: String) {
+        try? FileManager.default.removeItem(at: rtfURL(r))
+        try? FileManager.default.removeItem(at: htmlURL(r))
+    }
 
     func thumbnail(_ clip: Clip) -> NSImage? {
         guard let b = clip.blob else { return nil }

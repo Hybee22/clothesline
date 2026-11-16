@@ -60,7 +60,11 @@ final class LineController {
     var focusSearch = 0
 
     var flashID: UUID?
-    var toast: String?
+    var toast: Toast?
+    /// The card shown large under the line (hover-hold or ⌥).
+    var previewID: UUID?
+    /// Clips ⌘-clicked to copy together, in the order they were picked.
+    var picked: [UUID] = []
     var renamingLine: UUID?
     var draggingClip: UUID?
     var hoveredCard: UUID?
@@ -72,6 +76,14 @@ final class LineController {
     @ObservationIgnored private var hideWork: DispatchWorkItem?
     @ObservationIgnored private var toastWork: DispatchWorkItem?
     @ObservationIgnored private var screen: NSScreen?
+    @ObservationIgnored private var toastAction: (() -> Void)?
+    /// Testing: keeps one card previewed without hovering.
+    @ObservationIgnored var pinnedPreview: UUID?
+    @ObservationIgnored private var hoverTarget: UUID?
+    @ObservationIgnored private var hoverSince = Date()
+    @ObservationIgnored private var pendingDelete: (clip: Clip, index: Int)?
+    @ObservationIgnored private var purgeWork: DispatchWorkItem?
+    @ObservationIgnored private var lastSecretCheck = Date.distantPast
 
     init(store: Store) {
         self.store = store
@@ -141,6 +153,8 @@ final class LineController {
         keyboard = false
         renamingLine = nil
         peekUntil = nil
+        picked = []
+        previewID = nil
         withAnimation(.easeIn(duration: 0.2)) { shown = false }
         let w = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -189,7 +203,7 @@ final class LineController {
 
     private func layoutPanel(drawer: Bool? = nil) {
         let s = screen ?? NSScreen.main ?? NSScreen.screens[0]
-        let h = Layout.closedHeight + ((drawer ?? drawerOpen) ? Layout.drawerHeight : 0)
+        let h = Layout.closedHeight + ((drawer ?? drawerOpen) ? Layout.drawerHeight : previewID != nil ? Layout.previewRoom : 0)
         let top = s.visibleFrame.maxY
         let frame = NSRect(x: s.frame.minX, y: top - h, width: s.frame.width, height: h)
         panel.setFrame(frame, display: true)
@@ -202,6 +216,11 @@ final class LineController {
     private func tick() {
         let p = NSEvent.mouseLocation
         let now = Date()
+        if now.timeIntervalSince(lastSecretCheck) > 1 {
+            lastSecretCheck = now
+            expireSecrets()
+        }
+        if panel.isVisible && shown && hideWork == nil { updatePreview(now) }
         let buttons = NSEvent.pressedMouseButtons
         if buttons == 0, draggingClip != nil {
             if let r = releasedAt, now.timeIntervalSince(r) > 0.8 { draggingClip = nil; releasedAt = nil }
@@ -249,12 +268,15 @@ final class LineController {
             if wasInbox { scroll = 0 }
         }
         if panel.isVisible && shown {
-            if wasInbox { kickNewest(added.id) }
+            if wasInbox { kickNewest(added.id); PegSound.play() }
         } else if Prefs.shared.peekOnCopy && !panel.isVisible {
             currentLine = Store.inboxID
             scroll = 0
             show(peekFor: 1.7)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.kickNewest(added.id) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.kickNewest(added.id)
+                PegSound.play()
+            }
         }
     }
 
@@ -265,17 +287,29 @@ final class LineController {
         }
     }
 
-    func copy(_ clip: Clip) {
-        Paster.write(clip, store: store)
+    func copy(_ clip: Clip, plain: Bool = false) {
+        Paster.write(clip, store: store, plain: plain)
         flash(clip.id)
         swing.kick(clip.id, 1.1)
-        if !keyboard { showToast("Copied") }
+        if !keyboard { showToast(plain && clip.rich != nil ? "Copied as plain text" : "Copied") }
+    }
+
+    /// Copies one of a colour's other spellings (HEX, RGB, SwiftUI…).
+    func copy(_ value: String, from clip: Clip) {
+        Paster.writeString(value)
+        flash(clip.id)
+        swing.kick(clip.id, 1.1)
+        showToast("Copied \(value)")
     }
 
     /// Copies, then pastes into the app in front if Accessibility allows it.
-    func paste(_ clip: Clip) {
-        Paster.write(clip, store: store)
+    func paste(_ clip: Clip, plain: Bool = false) {
+        Paster.write(clip, store: store, plain: plain)
         flash(clip.id)
+        sendPasteOrExplain()
+    }
+
+    private func sendPasteOrExplain() {
         if Prefs.shared.autoPaste && Paster.canAutoPaste {
             hide()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { Paster.sendPaste() }
@@ -285,12 +319,139 @@ final class LineController {
         }
     }
 
+    /// Click copies, double-click pastes, ⇧ leaves out formatting, ⌘ picks it to copy with others.
     func activate(_ clip: Clip) {
-        if NSApp.currentEvent?.clickCount ?? 1 >= 2 { paste(clip) } else { copy(clip) }
+        let e = NSApp.currentEvent
+        let mods = e?.modifierFlags ?? []
+        if mods.contains(.command) { togglePick(clip.id); return }
+        let plain = mods.contains(.shift)
+        if e?.clickCount ?? 1 >= 2 { paste(clip, plain: plain) } else { copy(clip, plain: plain) }
     }
 
     func delete(_ clip: Clip) {
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) { store.delete(clip.id) }
+        finishPendingDelete()
+        var removed: (Clip, Int)?
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
+            removed = store.remove(clip.id)
+            picked.removeAll { $0 == clip.id }
+            if previewID == clip.id { previewID = nil }
+        }
+        guard let removed else { return }
+        selection = min(selection, max(0, visible.count - 1))
+        pendingDelete = (removed.0, removed.1)
+        let w = DispatchWorkItem { [weak self] in self?.finishPendingDelete() }
+        purgeWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: w)
+        showToast("Taken down", action: "Undo", for: 5) { [weak self] in self?.undoDelete() }
+    }
+
+    func undoDelete() {
+        guard let pd = pendingDelete else { return }
+        let c = pd.clip, i = pd.index
+        purgeWork?.cancel()
+        pendingDelete = nil
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.75)) { store.restore(c, at: i) }
+        swing.kick(c.id, 3)
+        PegSound.play()
+        showToast("Put back")
+    }
+
+    private func finishPendingDelete() {
+        purgeWork?.cancel()
+        if let c = pendingDelete?.clip { store.purgeFiles(c) }
+        pendingDelete = nil
+    }
+
+    // MARK: Picking several clips
+
+    func togglePick(_ id: UUID) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            if let i = picked.firstIndex(of: id) { picked.remove(at: i) } else { picked.append(id) }
+        }
+        swing.kick(id, 1.4)
+        if !keyboard { panel.makeKey() }
+    }
+
+    func copyPicked(paste: Bool) {
+        let clips = picked.compactMap { id in store.clips.first { $0.id == id } }
+        guard !clips.isEmpty else { return }
+        Paster.writeCombined(clips, store: store)
+        for c in clips { swing.kick(c.id, 1.2) }
+        withAnimation(.easeOut(duration: 0.2)) { picked = [] }
+        if paste { sendPasteOrExplain() } else { showToast("Copied \(clips.count) clips together") }
+    }
+
+    func clearPicks() { withAnimation(.easeOut(duration: 0.2)) { picked = [] } }
+
+    // MARK: Reordering
+
+    /// Drops a dragged clip in front of `target` on the line being shown.
+    func move(_ id: UUID, before target: UUID) -> Bool {
+        guard currentLine != Store.inboxID, id != target else { return false }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { store.move(id, before: target, on: currentLine) }
+        swing.kick(id, 2.4)
+        PegSound.play()
+        return true
+    }
+
+    // MARK: Preview
+
+    private func updatePreview(_ now: Date) {
+        let option = NSEvent.modifierFlags.contains(.option)
+        var target: UUID?
+        if drawerOpen || draggingClip != nil || renamingLine != nil {
+            target = nil
+        } else if keyboard {
+            target = option && visible.indices.contains(selection) ? visible[selection].id : nil
+        } else {
+            target = hoveredCard
+        }
+        if let pinnedPreview { setPreview(pinnedPreview); return }
+        if target != hoverTarget {
+            hoverTarget = target
+            hoverSince = now
+        }
+        let want = target != nil && (option || now.timeIntervalSince(hoverSince) > 0.9)
+        setPreview(want ? target : nil)
+    }
+
+    private func setPreview(_ id: UUID?) {
+        guard id != previewID else { return }
+        if previewID == nil, id != nil {
+            previewID = id
+            layoutPanel()
+            previewID = nil
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { previewID = id }
+        } else if id == nil {
+            withAnimation(.easeOut(duration: 0.14)) { previewID = nil }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+                guard let self, self.previewID == nil, self.panel.isVisible, !self.drawerOpen else { return }
+                self.layoutPanel()
+            }
+        } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { previewID = id }
+        }
+    }
+
+    // MARK: Secrets
+
+    private func expireSecrets() {
+        let minutes = Prefs.shared.secretMinutes
+        guard minutes > 0 else { return }
+        let old = store.expiredSecrets(olderThan: TimeInterval(minutes * 60))
+        guard !old.isEmpty else { return }
+        let pb = NSPasteboard.general
+        for c in old {
+            // Don't leave the secret sitting on the clipboard either.
+            if let t = c.text, pb.string(forType: .string) == t {
+                pb.clearContents()
+                Paster.watcher?.skipCurrent()
+            }
+        }
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
+            for c in old { store.delete(c.id) }
+            picked.removeAll { id in old.contains { $0.id == id } }
+        }
         selection = min(selection, max(0, visible.count - 1))
     }
 
@@ -298,6 +459,7 @@ final class LineController {
         let name = line == Store.inboxID ? "Inbox" : (store.line(line)?.name ?? "line")
         withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) { store.hang(id, on: line) }
         if line == currentLine { swing.kick(id, 2) }
+        PegSound.play()
         showToast("Hung on \(name)")
     }
 
@@ -354,12 +516,24 @@ final class LineController {
         }
     }
 
-    func showToast(_ text: String) {
+    func showToast(_ text: String, action: String? = nil, for seconds: Double = 1.6, perform: (() -> Void)? = nil) {
         toastWork?.cancel()
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { toast = text }
-        let w = DispatchWorkItem { [weak self] in withAnimation(.easeOut(duration: 0.25)) { self?.toast = nil } }
+        toastAction = perform
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { toast = Toast(text: text, action: action) }
+        let w = DispatchWorkItem { [weak self] in
+            withAnimation(.easeOut(duration: 0.25)) { self?.toast = nil }
+            self?.toastAction = nil
+        }
         toastWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: w)
+    }
+
+    func runToastAction() {
+        let a = toastAction
+        toastWork?.cancel()
+        toastAction = nil
+        withAnimation(.easeOut(duration: 0.2)) { toast = nil }
+        a?()
     }
 
     /// Something dropped onto the line from another app.
@@ -406,6 +580,7 @@ final class LineController {
         let mods = e.modifierFlags.intersection([.command, .option, .control])
         if renamingLine != nil { return false }
         if code == 53 { // Esc
+            if !picked.isEmpty && !drawerOpen { clearPicks(); return true }
             if drawerOpen {
                 if !query.isEmpty { query = "" } else { setDrawer(false) }
                 if !keyboard && !drawerOpen { panel.resignKey() }
@@ -414,6 +589,8 @@ final class LineController {
         }
         if mods.contains(.command) {
             if e.charactersIgnoringModifiers == "f" { setDrawer(true); return true }
+            if e.charactersIgnoringModifiers == "z", pendingDelete != nil { undoDelete(); return true }
+            if e.charactersIgnoringModifiers == "c", !picked.isEmpty { copyPicked(paste: false); return true }
             if e.charactersIgnoringModifiers == "," { hide(); openSettings(); return true }
             return false
         }
@@ -423,7 +600,7 @@ final class LineController {
             case 125, 124: drawerSelection = min(drawerSelection + (code == 125 ? Layout.drawerColumns(width) : 1), max(0, results.count - 1)); return true
             case 126, 123: drawerSelection = max(0, drawerSelection - (code == 126 ? Layout.drawerColumns(width) : 1)); return true
             case 36, 76:
-                if results.indices.contains(drawerSelection) { paste(results[drawerSelection]) }
+                if results.indices.contains(drawerSelection) { paste(results[drawerSelection], plain: e.modifierFlags.contains(.shift)) }
                 return true
             default: return false
             }
@@ -434,7 +611,8 @@ final class LineController {
         case 124: selection = min(max(0, clips.count - 1), selection + 1); ensureVisible(selection); nudgeSelected(1); return true
         case 48: cycleLine(e.modifierFlags.contains(.shift) ? -1 : 1); return true
         case 36, 76:
-            if clips.indices.contains(selection) { paste(clips[selection]) }
+            if !picked.isEmpty { copyPicked(paste: true); return true }
+            if clips.indices.contains(selection) { paste(clips[selection], plain: e.modifierFlags.contains(.shift)) }
             return true
         case 51, 117:
             if clips.indices.contains(selection) { delete(clips[selection]) }
@@ -462,4 +640,10 @@ final class LineController {
         let clips = visible
         if clips.indices.contains(selection) { swing.kick(clips[selection].id, -dir * 1.2) }
     }
+}
+
+struct Toast: Equatable {
+    var id = UUID()
+    let text: String
+    let action: String?
 }

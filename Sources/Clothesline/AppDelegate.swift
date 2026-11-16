@@ -67,6 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "next-line": line.cycleLine(1)
         case "demo-capture": line.capture(Demo.random(store))
         case "scroll": line.scrollBy(400)
+        // Used when testing without a mouse.
+        case "demo-delete": if let c = line.visible.first { line.delete(c) }
+        case "demo-pick": for c in line.visible.prefix(3) { line.togglePick(c.id) }
+        case "demo-preview": line.pinnedPreview = line.pinnedPreview == nil ? line.visible.dropFirst().first?.id : nil
+        case "undo": line.undoDelete()
         case "quit": NSApp.terminate(nil)
         default: break
         }
@@ -170,9 +175,21 @@ struct SettingsView: View {
                 Text("Anything a password manager marks as hidden is never captured, whichever app it comes from.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Secrets") {
+                Picker("Remove secret-looking clips", selection: $prefs.secretMinutes) {
+                    Text("After 1 minute").tag(1)
+                    Text("After 2 minutes").tag(2)
+                    Text("After 5 minutes").tag(5)
+                    Text("After 15 minutes").tag(15)
+                    Text("Never (keep them masked)").tag(0)
+                }
+                Text("API keys, tokens, private keys and passwords in connection strings are masked on their cards. When they're removed, they're also cleared from the clipboard if still there. Hang one on a line to keep it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("The line") {
                 Toggle("Rest the pointer at the top edge to show the line", isOn: $prefs.revealOnEdge)
                 Toggle("Peek down when something new is copied", isOn: $prefs.peekOnCopy)
+                Toggle("Peg sound when a clip is hung", isOn: $prefs.pegSound)
                 Picker("Keyboard shortcut", selection: $prefs.shortcut) {
                     ForEach(Shortcut.allCases) { Text($0.label).tag($0) }
                 }
@@ -227,7 +244,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 640)
+        .frame(width: 540, height: 720)
         .onReceive(timer) { _ in trusted = Paster.canAutoPaste }
     }
 
@@ -267,6 +284,7 @@ enum Demo {
             (Capture.text("https://developer.apple.com/documentation/swiftui/animation", source: "com.apple.Safari"), nil),
             (Capture.text("#5B8DEF", source: "com.figma.Desktop"), snippets),
             (Capture.text("Meeting moved to Thursday 3pm. Bring the dmg build.", source: "com.apple.Notes"), nil),
+            (Capture.text("DATABASE_URL=postgres://app:demo-only-password@localhost:5432/clothesline", source: "com.apple.Terminal"), nil),
         ]
         if let img = gradientImage(), let clip = Capture.image(img, source: "com.apple.Preview", store: store) {
             store.add(clip)

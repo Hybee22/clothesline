@@ -58,13 +58,27 @@ enum Capture {
             return image(imageData, source: source, store: store)
         }
         guard let string, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return text(String(string.prefix(200_000)), source: source)
+        var clip = text(String(string.prefix(200_000)), source: source)
+        if clip.kind == .text && !clip.isSecret { clip.rich = saveRich(pb, store: store) }
+        return clip
     }
 
     static func text(_ s: String, source: String?) -> Clip {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind: ClipKind = ColorParse.color(t) != nil ? .color : (isSingleURL(t) ? .link : .text)
-        return Clip(kind: kind, text: kind == .text ? s : t, sourceBundleID: source, hash: Hash.of(kind.rawValue + t))
+        var clip = Clip(kind: kind, text: kind == .text ? s : t, sourceBundleID: source, hash: Hash.of(kind.rawValue + t))
+        if kind != .color && Secrets.looksSecret(s) { clip.secret = true }
+        return clip
+    }
+
+    /// Keeps the formatted (RTF / HTML) version of copied text, so pasting it back keeps bold, links and so on.
+    private static func saveRich(_ pb: NSPasteboard, store: Store) -> String? {
+        let rtf = pb.data(forType: .rtf), html = pb.data(forType: .html)
+        guard rtf != nil || html != nil, (rtf?.count ?? 0) + (html?.count ?? 0) < 4_000_000 else { return nil }
+        let name = UUID().uuidString
+        if let rtf { try? rtf.write(to: store.rtfURL(name)) }
+        if let html { try? html.write(to: store.htmlURL(name)) }
+        return name
     }
 
     static func image(_ data: Data, source: String?, store: Store) -> Clip? {
@@ -140,12 +154,18 @@ enum ColorParse {
 enum Paster {
     static weak var watcher: Watcher?
 
-    static func write(_ clip: Clip, store: Store) {
+    /// Puts a clip on the clipboard. `plain` leaves out the formatting of rich text.
+    static func write(_ clip: Clip, store: Store, plain: Bool = false) {
         let pb = NSPasteboard.general
         pb.clearContents()
         switch clip.kind {
         case .text, .color:
+            let rtf = plain ? nil : clip.rich.flatMap { try? Data(contentsOf: store.rtfURL($0)) }
+            let html = plain ? nil : clip.rich.flatMap { try? Data(contentsOf: store.htmlURL($0)) }
+            pb.declareTypes([.string] + (rtf != nil ? [.rtf] : []) + (html != nil ? [.html] : []), owner: nil)
             pb.setString(clip.text ?? "", forType: .string)
+            if let rtf { pb.setData(rtf, forType: .rtf) }
+            if let html { pb.setData(html, forType: .html) }
         case .link:
             let s = clip.text ?? ""
             pb.declareTypes([.string, .URL], owner: nil)
@@ -159,6 +179,35 @@ enum Paster {
             }
         case .files:
             pb.writeObjects((clip.paths ?? []).map { URL(fileURLWithPath: $0) as NSURL })
+        }
+        watcher?.skipCurrent()
+    }
+
+    static func writeString(_ s: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+        watcher?.skipCurrent()
+    }
+
+    /// Several clips at once, in the order they were picked.
+    static func writeCombined(_ clips: [Clip], store: Store) {
+        let pb = NSPasteboard.general
+        func fileURLs(_ c: Clip) -> [URL] {
+            switch c.kind {
+            case .files: return (c.paths ?? []).map { URL(fileURLWithPath: $0) }
+            case .image: return c.blob.map { [store.blobURL($0)] } ?? []
+            default: return []
+            }
+        }
+        pb.clearContents()
+        if clips.allSatisfy({ $0.kind == .files || $0.kind == .image }) {
+            pb.writeObjects(clips.flatMap(fileURLs) as [NSURL])
+        } else {
+            let text = clips.map { c in
+                c.kind == .files || c.kind == .image ? fileURLs(c).map(\.path).joined(separator: "\n") : (c.text ?? "")
+            }.joined(separator: "\n")
+            pb.setString(text, forType: .string)
         }
         watcher?.skipCurrent()
     }

@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 enum Layout {
     static let closedHeight: CGFloat = 318
     static let drawerHeight: CGFloat = 380
+    /// Extra room under the line while a card is shown large.
+    static let previewRoom: CGFloat = 330
+    static let previewW: CGFloat = 470
     static let cardW: CGFloat = 150
     static let cardH: CGFloat = 180
     static let cardTop: CGFloat = 16          // card's top edge inside the hanging view
@@ -53,7 +56,7 @@ struct LineRoot: View {
         let w = c.width
         let clips = c.visible
         let first = Layout.firstVisible(c.scroll)
-        let total = Layout.closedHeight + (c.drawerOpen ? Layout.drawerHeight : 0)
+        let total = Layout.closedHeight + (c.drawerOpen ? Layout.drawerHeight : c.previewID != nil ? Layout.previewRoom : 0)
         ZStack(alignment: .topLeading) {
             scrim(w)
                 .contentShape(Rectangle())
@@ -97,9 +100,31 @@ struct LineRoot: View {
                     .zIndex(30)
             }
 
-            if let t = c.toast {
-                ToastView(text: t)
+            if let id = c.previewID, let i = clips.firstIndex(where: { $0.id == id }) {
+                let x = Layout.slotX(i, scroll: c.scroll, width: w)
+                let top = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH + 4
+                PreviewCard(clip: clips[i], store: c.store)
+                    .frame(width: Layout.previewW)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: Layout.previewW, height: Layout.previewRoom - 14, alignment: .top)
+                    .position(x: min(max(x, Layout.previewW / 2 + 16), w - Layout.previewW / 2 - 16),
+                              y: top + (Layout.previewRoom - 14) / 2)
+                    .transition(.modifier(active: SwingForward(p: 1), identity: SwingForward(p: 0)))
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+
+            if !c.picked.isEmpty {
+                PickBar(c: c)
                     .position(x: w / 2, y: Layout.closedHeight - 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(35)
+            }
+
+            if let t = c.toast {
+                ToastView(toast: t, c: c)
+                    .id(t.id)
+                    .position(x: w / 2, y: Layout.closedHeight - (c.picked.isEmpty ? 24 : 64))
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(40)
             }
@@ -145,6 +170,17 @@ struct Hang: ViewModifier, Animatable {
             .opacity(fade)
             .allowsHitTesting(fade > 0.4)
             .position(x: x, y: y - Layout.pegTop + Layout.viewH / 2)
+    }
+}
+
+/// The preview tips forward out of the line, hinged at its top edge.
+struct SwingForward: ViewModifier {
+    let p: Double
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(.degrees(-70 * p), axis: (x: 1, y: 0, z: 0), anchor: .top, perspective: 0.6)
+            .scaleEffect(1 - 0.25 * p, anchor: .top)
+            .opacity(1 - p)
     }
 }
 
@@ -264,10 +300,13 @@ struct CardView: View {
     let badge: Int?
     @Bindable var c: LineController
     @State private var lastX: CGFloat?
+    @State private var dropTarget = false
 
     var body: some View {
         let hover = c.hoveredCard == clip.id
         let selected = c.keyboard && c.selection == index
+        let pick = c.picked.firstIndex(of: clip.id)
+        let reorderable = c.currentLine != Store.inboxID && c.draggingClip != nil && c.draggingClip != clip.id
         ZStack(alignment: .top) {
             CardFace(clip: clip, store: c.store, lifted: hover || selected)
                 .frame(width: Layout.cardW, height: Layout.cardH)
@@ -290,8 +329,29 @@ struct CardView: View {
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.accentColor, lineWidth: selected ? 2.5 : 0)
+                        .strokeBorder(Color.accentColor, lineWidth: selected || pick != nil ? 2.5 : 0)
                 )
+                .overlay(alignment: .topLeading) {
+                    if let pick {
+                        Text("\(pick + 1)")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.accentColor))
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.2))
+                            .foregroundStyle(.white)
+                            .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                            .offset(x: -7, y: -7)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .overlay(alignment: .leading) {
+                    // Where a dragged clip will land when reordering a line.
+                    if dropTarget && reorderable {
+                        Capsule().fill(Color.accentColor).frame(width: 4, height: Layout.cardH * 0.7)
+                            .shadow(color: Color.accentColor.opacity(0.7), radius: 6)
+                            .offset(x: -14)
+                    }
+                }
                 .overlay(alignment: .bottomTrailing) {
                     if let badge {
                         Text("\(badge)")
@@ -305,6 +365,8 @@ struct CardView: View {
                     }
                 }
                 .scaleEffect(hover ? 1.04 : 1, anchor: .top)
+                .offset(x: dropTarget && reorderable ? 26 : 0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: dropTarget)
                 .padding(.top, Layout.cardTop)
             Peg(hue: c.store.line(clip.lineID)?.hue, open: hover)
         }
@@ -332,8 +394,13 @@ struct CardView: View {
             c.draggingClip = clip.id
             return DragOut.provider(clip, store: c.store)
         }
+        .onDrop(of: [.item], isTargeted: $dropTarget) { _ in
+            guard reorderable, let d = c.draggingClip else { return false }
+            c.draggingClip = nil
+            return c.move(d, before: clip.id)
+        }
         .contextMenu { ClipMenu(clip: clip, c: c) }
-        .help("Click to copy · double-click to paste · drag onto an app, a folder or a line")
+        .help("Click to copy · double-click to paste · ⇧ without formatting · ⌘-click to pick several · hold to preview (or ⌥)")
     }
 }
 
@@ -350,7 +417,7 @@ struct CardFace: View {
             switch clip.kind {
             case .image: imageFace
             case .color: colorFace
-            default: paperFace
+            default: if clip.isSecret { secretFace } else { paperFace }
             }
         }
         .clipShape(shape)
@@ -435,7 +502,7 @@ struct CardFace: View {
         default:
             let t = clip.text ?? ""
             let lines = t.split(separator: "\n", omittingEmptySubsequences: false).count
-            return "\(t.count) chars" + (lines > 1 ? " · \(lines) lines" : "")
+            return "\(t.count) chars" + (lines > 1 ? " · \(lines) lines" : "") + (clip.rich != nil ? " · formatted" : "")
         }
     }
 
@@ -482,6 +549,42 @@ struct CardFace: View {
         case .files: return "doc"
         case .image: return "photo"
         case .color: return "paintpalette"
+        }
+    }
+
+    private var secretFace: some View {
+        let dark = scheme == .dark
+        let red = Color(hue: 0.02, saturation: 0.7, brightness: 0.9)
+        return ZStack(alignment: .topLeading) {
+            LinearGradient(colors: dark ? [Color(white: 0.21), Color(white: 0.14)] : [Color(white: 0.99), Color(white: 0.91)],
+                           startPoint: .top, endPoint: .bottom)
+            // Diagonal hatching, like a sealed envelope.
+            Canvas { ctx, size in
+                var p = Path()
+                var x: CGFloat = -size.height
+                while x < size.width {
+                    p.move(to: CGPoint(x: x, y: size.height)); p.addLine(to: CGPoint(x: x + size.height, y: 0))
+                    x += 9
+                }
+                ctx.stroke(p, with: .color(red.opacity(dark ? 0.10 : 0.07)), lineWidth: 3)
+            }
+            VStack(alignment: .leading, spacing: compact ? 5 : 7) {
+                HStack(spacing: 5) {
+                    Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold))
+                    Text("SECRET").font(.system(size: 9, weight: .bold)).tracking(0.6)
+                    Spacer(minLength: 0)
+                    Text(ago(clip.created)).font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(red)
+                Text(Secrets.mask(clip.text ?? ""))
+                    .font(.system(size: compact ? 11 : 12.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(compact ? 2 : 3)
+                Spacer(minLength: 0)
+                SecretCountdown(clip: clip)
+            }
+            .padding(compact ? 10 : 12)
+            .padding(.top, compact ? 0 : 6)
         }
     }
 
@@ -587,6 +690,18 @@ struct ClipMenu: View {
     var body: some View {
         Button("Copy") { c.copy(clip) }
         Button("Paste") { c.paste(clip) }
+        if clip.rich != nil {
+            Button("Copy as Plain Text") { c.copy(clip, plain: true) }
+            Button("Paste as Plain Text") { c.paste(clip, plain: true) }
+        }
+        if clip.kind == .color {
+            Menu("Copy as") {
+                ForEach(ColorFormats.all(clip.text ?? ""), id: \.label) { f in
+                    Button("\(f.label)   \(f.value)") { c.copy(f.value, from: clip) }
+                }
+            }
+        }
+        Button(c.picked.contains(clip.id) ? "Unpick" : "Pick to Copy Together (⌘-click)") { c.togglePick(clip.id) }
         Menu("Hang on") {
             if clip.lineID != nil { Button("Inbox") { c.hang(clip.id, on: Store.inboxID) } }
             ForEach(c.store.lines) { l in
@@ -1018,14 +1133,82 @@ struct DrawerTile: View {
 }
 
 struct ToastView: View {
-    let text: String
+    let toast: Toast
+    let c: LineController
+
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .semibold))
-            .padding(.horizontal, 14).padding(.vertical, 7)
-            .background(Glass().clipShape(Capsule()))
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.3), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
-            .allowsHitTesting(false)
+        HStack(spacing: 10) {
+            Text(toast.text).font(.system(size: 12, weight: .semibold))
+            if let action = toast.action {
+                Button { c.runToastAction() } label: {
+                    Text(action + (action == "Undo" ? "  ⌘Z" : ""))
+                        .font(.system(size: 12, weight: .bold))
+                        .padding(.horizontal, 9).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.leading, 14).padding(.trailing, toast.action == nil ? 14 : 5).padding(.vertical, toast.action == nil ? 7 : 4)
+        .background(Glass().clipShape(Capsule()))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.3), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+        .allowsHitTesting(toast.action != nil)
+    }
+}
+
+/// Shown while clips are ⌘-clicked: copy or paste them all at once.
+struct PickBar: View {
+    let c: LineController
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("\(c.picked.count) picked")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.leading, 6)
+            Button("Copy Together  ⌘C") { c.copyPicked(paste: false) }
+                .buttonStyle(PillButton(primary: false))
+            Button("Paste Together  ↩") { c.copyPicked(paste: true) }
+                .buttonStyle(PillButton(primary: true))
+            BarButton(symbol: "xmark", help: "Clear (Esc)") { c.clearPicks() }
+        }
+        .padding(4)
+        .background(Glass().clipShape(Capsule()))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.3), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+    }
+}
+
+struct PillButton: ButtonStyle {
+    let primary: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11.5, weight: .semibold))
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(Capsule().fill(primary ? Color.accentColor : Color.primary.opacity(0.1)))
+            .foregroundStyle(primary ? Color.white : Color.primary)
+            .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+/// "Removed in 1:42" on a secret's card.
+struct SecretCountdown: View {
+    let clip: Clip
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let minutes = Prefs.shared.secretMinutes
+            Group {
+                if clip.lineID != nil || minutes == 0 {
+                    Text("Kept · masked")
+                } else {
+                    let left = max(0, Int(clip.created.addingTimeInterval(TimeInterval(minutes * 60)).timeIntervalSince(ctx.date)))
+                    Text("Removed in \(left / 60):\(String(format: "%02d", left % 60))")
+                        .monospacedDigit()
+                }
+            }
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(.secondary)
+        }
     }
 }

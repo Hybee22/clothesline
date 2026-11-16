@@ -51,11 +51,15 @@ final class Prefs {
         didSet { d.set(shortcut.rawValue, forKey: "shortcut"); onShortcutChange() }
     }
     var onboarded: Bool { didSet { d.set(onboarded, forKey: "onboarded") } }
+    var pegSound: Bool { didSet { d.set(pegSound, forKey: "pegSound") } }
+    /// Minutes before a secret-looking Inbox clip is removed; 0 keeps them.
+    var secretMinutes: Int { didSet { d.set(secretMinutes, forKey: "secretMinutes") } }
 
     private init() {
         d.register(defaults: [
             "revealOnEdge": true, "peekOnCopy": true, "autoPaste": true,
             "inboxCapacity": 16, "historyLimit": 500, "ignoredApps": defaultIgnoredApps,
+            "pegSound": true, "secretMinutes": 2,
         ])
         paused = d.bool(forKey: "paused")
         revealOnEdge = d.bool(forKey: "revealOnEdge")
@@ -66,5 +70,7 @@ final class Prefs {
         ignoredApps = d.stringArray(forKey: "ignoredApps") ?? defaultIgnoredApps
         shortcut = Shortcut(rawValue: d.integer(forKey: "shortcut")) ?? .shiftCmdV
         onboarded = d.bool(forKey: "onboarded")
+        pegSound = d.bool(forKey: "pegSound")
+        secretMinutes = d.integer(forKey: "secretMinutes")
     }
 }
