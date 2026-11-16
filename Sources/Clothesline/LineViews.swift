@@ -64,6 +64,7 @@ struct LineRoot: View {
             Rope(sag: c.sag, width: w, dark: scheme == .dark)
 
             BasketHanger(c: c, width: w)
+                .zIndex(5)
 
             if clips.isEmpty {
                 EmptyCard(line: c.currentLine == Store.inboxID ? nil : c.store.line(c.currentLine)?.name)
@@ -76,7 +77,8 @@ struct LineRoot: View {
                 let badge = c.keyboard && i >= first && i < first + 9 ? i - first + 1 : nil
                 CardView(clip: clip, index: i, badge: badge, c: c)
                     .modifier(Hang(x: x, sag: c.sag, width: w, angle: c.swing.angle[clip.id] ?? 0))
-                    .zIndex(c.hoveredCard == clip.id ? 10 : Double(-i) * 0.001)
+                    // Above the scrim (zIndex 0), which closes the line when you click it.
+                    .zIndex(c.hoveredCard == clip.id ? 10 : 1 - Double(i) * 0.001)
                     .transition(.asymmetric(
                         insertion: .modifier(active: DropIn(p: 1), identity: DropIn(p: 0)),
                         removal: .modifier(active: Fall(p: 1), identity: Fall(p: 0))))
