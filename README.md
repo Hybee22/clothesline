@@ -11,7 +11,7 @@ The idea comes from [Tendedero](https://github.com/alejandrobujan/tendedero), wh
 - **Undo**: taking a card down shows *Undo* for a few seconds (or press ⌘Z).
 - **Pick several**: ⌘-click cards to number them, then *Copy Together* (⌘C) or *Paste Together* (Return) joins them in the order you picked.
 - **Plain text**: formatted text keeps its bold, links and so on when pasted back. Hold ⇧ (⇧-click, ⇧-double-click, ⇧Return) to leave the formatting out.
-- **Reorder**: drag a card onto another card on your own lines to put it in front of that card.
+- **Reorder**: drag a card along the line (Inbox too). The others part to show where it will land.
 - **Colours**: right-click a colour card → *Copy as* HEX, RGB, HSL, SwiftUI or Flutter.
 - **Drop in**: drag files, text or images from other apps onto the line to hang them.
 - **Keyboard** (after ⇧⌘V): ←/→ choose, Return pastes, 1–9 paste by number, Space copies, ⌫ deletes, Tab switches line, type to search, ⌥ previews, Esc closes.

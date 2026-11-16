@@ -41,6 +41,9 @@ final class LineController {
     let swing = Swing()
     @ObservationIgnored var openSettings: () -> Void = {}
     @ObservationIgnored private(set) var panel: LinePanel!
+    /// The big preview lives in its own see-through window that ignores the mouse,
+    /// so showing it never resizes or moves the line.
+    @ObservationIgnored private var previewPanel: LinePanel!
 
     // What the line shows
     var shown = false
@@ -65,6 +68,8 @@ final class LineController {
     var previewID: UUID?
     /// Clips ⌘-clicked to copy together, in the order they were picked.
     var picked: [UUID] = []
+    /// While a card is dragged along the line: the gap it would drop into.
+    var dropIndex: Int?
     var renamingLine: UUID?
     var draggingClip: UUID?
     var hoveredCard: UUID?
@@ -92,6 +97,11 @@ final class LineController {
         host.sizingOptions = []
         host.controller = self
         panel.contentView = host
+        previewPanel = LinePanel()
+        previewPanel.ignoresMouseEvents = true
+        let pHost = NSHostingView(rootView: PreviewLayer(c: self))
+        pHost.sizingOptions = []
+        previewPanel.contentView = pHost
         let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -102,8 +112,9 @@ final class LineController {
         }
         NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.keyboard, self.renamingLine == nil else { return }
-                self.hide()
+                guard let self, self.renamingLine == nil else { return }
+                // Picks keep the line open until you click somewhere else.
+                if self.keyboard || !self.picked.isEmpty { self.hide() }
             }
         }
     }
@@ -139,6 +150,7 @@ final class LineController {
             shown = false
             sag = Layout.restSag + 46
             panel.orderFrontRegardless()
+            previewPanel.orderFrontRegardless()
             DispatchQueue.main.async { [self] in
                 withAnimation(.spring(response: 0.46, dampingFraction: 0.8)) { shown = true }
                 withAnimation(.interpolatingSpring(stiffness: 70, damping: 5.5).delay(0.06)) { sag = Layout.restSag }
@@ -159,6 +171,7 @@ final class LineController {
         let w = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
+            self.previewPanel.orderOut(nil)
             self.hideWork = nil
             self.drawerOpen = false
             self.query = ""
@@ -203,10 +216,12 @@ final class LineController {
 
     private func layoutPanel(drawer: Bool? = nil) {
         let s = screen ?? NSScreen.main ?? NSScreen.screens[0]
-        let h = Layout.closedHeight + ((drawer ?? drawerOpen) ? Layout.drawerHeight : previewID != nil ? Layout.previewRoom : 0)
+        let h = Layout.closedHeight + ((drawer ?? drawerOpen) ? Layout.drawerHeight : 0)
         let top = s.visibleFrame.maxY
         let frame = NSRect(x: s.frame.minX, y: top - h, width: s.frame.width, height: h)
         panel.setFrame(frame, display: true)
+        let ph = Layout.closedHeight + Layout.previewRoom
+        previewPanel.setFrame(NSRect(x: s.frame.minX, y: top - ph, width: s.frame.width, height: ph), display: false)
         width = frame.width
         scroll = min(scroll, Layout.maxScroll(count: visible.count, width: width))
     }
@@ -223,7 +238,11 @@ final class LineController {
         if panel.isVisible && shown && hideWork == nil { updatePreview(now) }
         let buttons = NSEvent.pressedMouseButtons
         if buttons == 0, draggingClip != nil {
-            if let r = releasedAt, now.timeIntervalSince(r) > 0.8 { draggingClip = nil; releasedAt = nil }
+            if let r = releasedAt, now.timeIntervalSince(r) > 0.8 {
+                draggingClip = nil
+                releasedAt = nil
+                if dropIndex != nil { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { dropIndex = nil } }
+            }
             else if releasedAt == nil { releasedAt = now }
         } else { releasedAt = nil }
 
@@ -238,7 +257,7 @@ final class LineController {
             } else { edgeSince = nil }
             return
         }
-        guard shown, hideWork == nil, !keyboard, renamingLine == nil else { return }
+        guard shown, hideWork == nil, !keyboard, renamingLine == nil, picked.isEmpty, dropIndex == nil else { return }
         var zone = panel.frame
         let screenTop = (screen ?? NSScreen.main)?.frame.maxY ?? zone.maxY
         zone.size.height = screenTop - zone.minY
@@ -385,13 +404,23 @@ final class LineController {
 
     // MARK: Reordering
 
-    /// Drops a dragged clip in front of `target` on the line being shown.
-    func move(_ id: UUID, before target: UUID) -> Bool {
-        guard currentLine != Store.inboxID, id != target else { return false }
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { store.move(id, before: target, on: currentLine) }
+    /// Drops a dragged clip into gap `index` of the line being shown (counting without the clip itself).
+    func move(_ id: UUID, to index: Int) {
+        let others = visible.filter { $0.id != id }
+        let target = others.indices.contains(index) ? others[index].id : nil
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            store.move(id, before: target, on: currentLine)
+            dropIndex = nil
+        }
         swing.kick(id, 2.4)
         PegSound.play()
-        return true
+    }
+
+    /// Which gap the pointer is over, for a drag at `x` along the line.
+    func gapIndex(atX x: CGFloat, dragging id: UUID) -> Int {
+        let others = visible.filter { $0.id != id }
+        let i = Int(((x + scroll - Layout.slotStart) / Layout.spacing + 0.5).rounded(.down))
+        return max(0, min(others.count, i))
     }
 
     // MARK: Preview
@@ -411,23 +440,21 @@ final class LineController {
             hoverTarget = target
             hoverSince = now
         }
-        let want = target != nil && (option || now.timeIntervalSince(hoverSince) > 0.9)
+        if target == nil && previewID != nil && !option {
+            // Let the pointer cross the gap between two cards without the preview closing.
+            if now.timeIntervalSince(hoverSince) < 0.15 { return }
+        }
+        // Once a preview is up, moving to the next card switches it straight away.
+        let want = target != nil && (option || previewID != nil || now.timeIntervalSince(hoverSince) > 0.9)
         setPreview(want ? target : nil)
     }
 
     private func setPreview(_ id: UUID?) {
         guard id != previewID else { return }
-        if previewID == nil, id != nil {
-            previewID = id
-            layoutPanel()
-            previewID = nil
+        if previewID == nil {
             withAnimation(.spring(response: 0.38, dampingFraction: 0.78)) { previewID = id }
         } else if id == nil {
             withAnimation(.easeOut(duration: 0.14)) { previewID = nil }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
-                guard let self, self.previewID == nil, self.panel.isVisible, !self.drawerOpen else { return }
-                self.layoutPanel()
-            }
         } else {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { previewID = id }
         }

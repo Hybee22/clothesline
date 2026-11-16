@@ -72,6 +72,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "demo-pick": for c in line.visible.prefix(3) { line.togglePick(c.id) }
         case "demo-preview": line.pinnedPreview = line.pinnedPreview == nil ? line.visible.dropFirst().first?.id : nil
         case "undo": line.undoDelete()
+        case "demo-drag":
+            if line.dropIndex == nil, let first = line.visible.first {
+                line.draggingClip = first.id
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { line.dropIndex = 3 }
+            } else if let d = line.draggingClip {
+                line.draggingClip = nil
+                line.move(d, to: line.dropIndex ?? 0)
+            }
         case "quit": NSApp.terminate(nil)
         default: break
         }

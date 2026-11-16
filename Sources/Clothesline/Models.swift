@@ -202,7 +202,20 @@ final class Store {
 
     /// Puts `id` just before `target` on a line (or at the end when `target` is nil).
     func move(_ id: UUID, before target: UUID?, on line: UUID) {
-        guard line != Store.inboxID else { return }
+        if line == Store.inboxID {
+            // The Inbox follows the order of `clips`, so move it there.
+            let shown = clips(on: line).map(\.id).filter { $0 != id }
+            guard let from = clips.firstIndex(where: { $0.id == id }) else { return }
+            var c = clips.remove(at: from)
+            c.lineID = nil
+            c.pinnedAt = nil
+            let anchor = target ?? shown.last
+            var at = anchor.flatMap { a in clips.firstIndex { $0.id == a } } ?? clips.count
+            if target == nil, anchor != nil { at += 1 }
+            clips.insert(c, at: min(at, clips.count))
+            save()
+            return
+        }
         var order = clips(on: line).map(\.id).filter { $0 != id }
         let at = target.flatMap { t in order.firstIndex(of: t) } ?? order.count
         order.insert(id, at: at)

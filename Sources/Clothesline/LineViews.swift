@@ -56,7 +56,7 @@ struct LineRoot: View {
         let w = c.width
         let clips = c.visible
         let first = Layout.firstVisible(c.scroll)
-        let total = Layout.closedHeight + (c.drawerOpen ? Layout.drawerHeight : c.previewID != nil ? Layout.previewRoom : 0)
+        let total = Layout.closedHeight + (c.drawerOpen ? Layout.drawerHeight : 0)
         ZStack(alignment: .topLeading) {
             scrim(w)
                 .contentShape(Rectangle())
@@ -76,10 +76,11 @@ struct LineRoot: View {
             }
 
             ForEach(Array(clips.enumerated()), id: \.element.id) { i, clip in
-                let x = Layout.slotX(i, scroll: c.scroll, width: w)
+                let x = Layout.slotX(i, scroll: c.scroll, width: w) + gapShift(i, clips)
                 let badge = c.keyboard && i >= first && i < first + 9 ? i - first + 1 : nil
                 CardView(clip: clip, index: i, badge: badge, c: c)
                     .modifier(Hang(x: x, sag: c.sag, width: w, angle: c.swing.angle[clip.id] ?? 0))
+                    .opacity(c.draggingClip == clip.id && c.dropIndex != nil ? 0 : 1)  // the drag image stands in for it
                     // Above the scrim (zIndex 0), which closes the line when you click it.
                     .zIndex(c.hoveredCard == clip.id ? 10 : 1 - Double(i) * 0.001)
                     .transition(.asymmetric(
@@ -100,23 +101,13 @@ struct LineRoot: View {
                     .zIndex(30)
             }
 
-            if let id = c.previewID, let i = clips.firstIndex(where: { $0.id == id }) {
-                let x = Layout.slotX(i, scroll: c.scroll, width: w)
-                let top = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH + 4
-                PreviewCard(clip: clips[i], store: c.store)
-                    .frame(width: Layout.previewW)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: Layout.previewW, height: Layout.previewRoom - 14, alignment: .top)
-                    .position(x: min(max(x, Layout.previewW / 2 + 16), w - Layout.previewW / 2 - 16),
-                              y: top + (Layout.previewRoom - 14) / 2)
-                    .transition(.modifier(active: SwingForward(p: 1), identity: SwingForward(p: 0)))
-                    .allowsHitTesting(false)
-                    .zIndex(25)
-            }
-
             if !c.picked.isEmpty {
+                // Sits under the picked cards rather than in the middle of the screen.
+                let xs = c.picked.compactMap { id in clips.firstIndex { $0.id == id } }.map { Layout.slotX($0, scroll: c.scroll, width: w) }
+                let mid = xs.isEmpty ? w / 2 : (xs.min()! + xs.max()!) / 2
                 PickBar(c: c)
-                    .position(x: w / 2, y: Layout.closedHeight - 24)
+                    .fixedSize()
+                    .position(x: min(max(mid, 220), w - 220), y: Layout.closedHeight - 24)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(35)
             }
@@ -132,9 +123,17 @@ struct LineRoot: View {
         .frame(width: w, height: total, alignment: .topLeading)
         .offset(y: c.shown ? 0 : -(Layout.closedHeight + 30))
         .opacity(c.shown ? 1 : 0)
-        .onDrop(of: [.fileURL, .plainText, .image, .url], isTargeted: nil) { providers in
-            c.draggingClip == nil ? c.importDrop(providers, onto: c.currentLine) : false
-        }
+        .onDrop(of: [.item], delegate: LineDrop(c: c))
+    }
+
+    /// Opens a gap in the line where a dragged card would land.
+    private func gapShift(_ i: Int, _ clips: [Clip]) -> CGFloat {
+        guard let gap = c.dropIndex, let d = c.draggingClip, let from = clips.firstIndex(where: { $0.id == d }) else { return 0 }
+        if i == from { return 0 }
+        let j = i > from ? i - 1 : i          // index among the other cards
+        // Close the hole the dragged card left, then open one at the gap.
+        let close: CGFloat = i > from ? -Layout.spacing : 0
+        return close + (j >= gap ? Layout.spacing : 0)
     }
 
     private func scrim(_ w: CGFloat) -> some View {
@@ -170,6 +169,59 @@ struct Hang: ViewModifier, Animatable {
             .opacity(fade)
             .allowsHitTesting(fade > 0.4)
             .position(x: x, y: y - Layout.pegTop + Layout.viewH / 2)
+    }
+}
+
+/// Drops on the line: reorders a card dragged along it, or hangs things dragged in from other apps.
+struct LineDrop: DropDelegate {
+    let c: LineController
+
+    func validateDrop(info: DropInfo) -> Bool { true }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        if let d = c.draggingClip, info.location.y < Layout.closedHeight {
+            let g = c.gapIndex(atX: info.location.x, dragging: d)
+            if g != c.dropIndex { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { c.dropIndex = g } }
+        }
+        return DropProposal(operation: c.draggingClip != nil ? .move : .copy)
+    }
+
+    func dropExited(info: DropInfo) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { c.dropIndex = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        if let d = c.draggingClip {
+            let g = c.dropIndex ?? c.gapIndex(atX: info.location.x, dragging: d)
+            c.draggingClip = nil
+            c.move(d, to: g)
+            return true
+        }
+        return c.importDrop(info.itemProviders(for: [.fileURL, .plainText, .image, .url]), onto: c.currentLine)
+    }
+}
+
+/// Fills the see-through preview window that sits over the line.
+struct PreviewLayer: View {
+    let c: LineController
+
+    var body: some View {
+        let w = c.width
+        let clips = c.visible
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            if c.shown, let id = c.previewID, let i = clips.firstIndex(where: { $0.id == id }) {
+                let x = Layout.slotX(i, scroll: c.scroll, width: w)
+                let top = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH + 4
+                PreviewCard(clip: clips[i], store: c.store)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: Layout.previewW, height: Layout.previewRoom - 14, alignment: .top)
+                    .position(x: min(max(x, Layout.previewW / 2 + 16), w - Layout.previewW / 2 - 16),
+                              y: top + (Layout.previewRoom - 14) / 2)
+                    .transition(.modifier(active: SwingForward(p: 1), identity: SwingForward(p: 0)))
+            }
+        }
+        .frame(width: w, height: Layout.closedHeight + Layout.previewRoom, alignment: .topLeading)
     }
 }
 
@@ -300,13 +352,11 @@ struct CardView: View {
     let badge: Int?
     @Bindable var c: LineController
     @State private var lastX: CGFloat?
-    @State private var dropTarget = false
 
     var body: some View {
         let hover = c.hoveredCard == clip.id
         let selected = c.keyboard && c.selection == index
         let pick = c.picked.firstIndex(of: clip.id)
-        let reorderable = c.currentLine != Store.inboxID && c.draggingClip != nil && c.draggingClip != clip.id
         ZStack(alignment: .top) {
             CardFace(clip: clip, store: c.store, lifted: hover || selected)
                 .frame(width: Layout.cardW, height: Layout.cardH)
@@ -344,14 +394,6 @@ struct CardView: View {
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
-                .overlay(alignment: .leading) {
-                    // Where a dragged clip will land when reordering a line.
-                    if dropTarget && reorderable {
-                        Capsule().fill(Color.accentColor).frame(width: 4, height: Layout.cardH * 0.7)
-                            .shadow(color: Color.accentColor.opacity(0.7), radius: 6)
-                            .offset(x: -14)
-                    }
-                }
                 .overlay(alignment: .bottomTrailing) {
                     if let badge {
                         Text("\(badge)")
@@ -365,8 +407,6 @@ struct CardView: View {
                     }
                 }
                 .scaleEffect(hover ? 1.04 : 1, anchor: .top)
-                .offset(x: dropTarget && reorderable ? 26 : 0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: dropTarget)
                 .padding(.top, Layout.cardTop)
             Peg(hue: c.store.line(clip.lineID)?.hue, open: hover)
         }
@@ -393,11 +433,6 @@ struct CardView: View {
         .onDrag {
             c.draggingClip = clip.id
             return DragOut.provider(clip, store: c.store)
-        }
-        .onDrop(of: [.item], isTargeted: $dropTarget) { _ in
-            guard reorderable, let d = c.draggingClip else { return false }
-            c.draggingClip = nil
-            return c.move(d, before: clip.id)
         }
         .contextMenu { ClipMenu(clip: clip, c: c) }
         .help("Click to copy · double-click to paste · ⇧ without formatting · ⌘-click to pick several · hold to preview (or ⌥)")
