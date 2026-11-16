@@ -657,18 +657,22 @@ struct BasketHanger: View {
             }
             .stroke(Color(red: 0.86, green: 0.79, blue: 0.66), lineWidth: 1.2)
             .shadow(color: .black.opacity(0.3), radius: 1, y: 1)
+            .allowsHitTesting(false)
 
             BasketView(count: c.store.basketCount, open: c.drawerOpen, lifted: hover || targeted)
-                .rotationEffect(.radians(c.swing.angle[Store.inboxID] ?? 0), anchor: UnitPoint(x: 0.5, y: -0.6))
-                .position(x: bx, y: top + 30)
+                .contentShape(Rectangle())
                 .onHover { h in
                     hover = h
                     if h { c.swing.kick(Store.inboxID, 0.8) }
                 }
                 .onTapGesture { c.toggleDrawer() }
                 .help("The basket: everything you've copied. Click to search it")
+                // Gestures go before .position: after it they cover the whole line
+                // and steal hovers and clicks from the cards hanging under it.
+                .rotationEffect(.radians(c.swing.angle[Store.inboxID] ?? 0), anchor: UnitPoint(x: 0.5, y: -0.6))
+                .position(x: bx, y: top + 30)
 
-            Peg(hue: nil).position(x: bx, y: ry + 6)
+            Peg(hue: nil).position(x: bx, y: ry + 6).allowsHitTesting(false)
         }
         .frame(width: width, height: Layout.closedHeight, alignment: .topLeading)
     }
