@@ -221,21 +221,36 @@ struct FairyLights: View {
         TimelineView(.animation(minimumInterval: 1.0 / 20)) { ctx in
             let t = ctx.date.timeIntervalSinceReferenceDate
             Canvas { g, _ in
+                // The lights' own thin wire, twisting around the rope.
+                let wireY: (CGFloat) -> CGFloat = { x in
+                    Layout.ropeY(x, sag: sag, width: width, load: load) + 2.2 * sin(x / 13.5)
+                }
+                var wire = Path()
+                var wx = Layout.inset + 4
+                wire.move(to: CGPoint(x: wx, y: wireY(wx)))
+                while wx < width - Layout.inset - 4 {
+                    wx += 4
+                    wire.addLine(to: CGPoint(x: wx, y: wireY(wx)))
+                }
+                g.stroke(wire, with: .color(Color(red: 0.16, green: 0.22, blue: 0.14).opacity(0.85)), lineWidth: 1)
                 let step: CGFloat = 54
                 var x = Layout.inset + 34
                 var i = 0
                 while x < width - Layout.inset - 30 {
-                    let y = Layout.ropeY(x, sag: sag, width: width, load: load) + 7
+                    let y = wireY(x) + 7
                     let seed = Double(i) * 1.7
                     let glow = 0.62 + 0.38 * sin(t * (1.1 + Double(i % 5) * 0.23) + seed)
                     let color = Self.colors[i % Self.colors.count]
                     // Halo
-                    let r: CGFloat = 13
+                    let r: CGFloat = 11
                     g.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
                            with: .radialGradient(Gradient(colors: [color.opacity(0.55 * glow), color.opacity(0)]),
                                                  center: CGPoint(x: x, y: y), startRadius: 0, endRadius: r))
                     // Wire twist and bulb
-                    g.fill(Path(CGRect(x: x - 1, y: y - 6, width: 2, height: 3)), with: .color(Color(white: 0.25)))
+                    // A short lead down from the wire, then the bulb's cap and the bulb.
+                    g.stroke(Path { p in p.move(to: CGPoint(x: x, y: wireY(x))); p.addLine(to: CGPoint(x: x, y: y - 5)) },
+                             with: .color(Color(red: 0.16, green: 0.22, blue: 0.14).opacity(0.85)), lineWidth: 0.8)
+                    g.fill(Path(CGRect(x: x - 1.3, y: y - 6, width: 2.6, height: 3)), with: .color(Color(white: 0.3)))
                     g.fill(Path(ellipseIn: CGRect(x: x - 2.6, y: y - 3.4, width: 5.2, height: 6.8)),
                            with: .color(color.opacity(0.55 + 0.45 * glow)))
                     g.fill(Path(ellipseIn: CGRect(x: x - 1, y: y - 2.4, width: 1.6, height: 2.2)),

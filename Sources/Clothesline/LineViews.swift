@@ -73,7 +73,8 @@ struct LineRoot: View {
                 FairyLights(width: w, sag: c.sag, load: load)
                     .frame(width: w, height: Layout.closedHeight)
                     .transition(.opacity)
-                    .zIndex(0.5)
+                    // In front of the resting cards (zIndex about 1); a hovered card (10) still comes forward.
+                    .zIndex(9)
             }
             ForEach(c.loosePegs) { LoosePegView(peg: $0).zIndex(12) }
 
