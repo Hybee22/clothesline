@@ -205,10 +205,22 @@ struct LoosePegView: View {
 // MARK: - Fairy lights
 
 /// Warm bulbs along the rope after dark, each twinkling at its own pace.
-struct FairyLights: View {
+struct FairyLights: View, Animatable {
     let width: CGFloat
-    let sag: CGFloat
+    var sag: CGFloat
     let load: RopeLoad
+    /// The lights are drawn twice: the back half of each coil behind the rope, the front half
+    /// (and the bulbs) in front of it and the cards.
+    var front = true
+
+    /// Follow the rope's sag as it animates (when the line drops in), not just its resting value.
+    var animatableData: CGFloat {
+        get { sag }
+        set { sag = newValue }
+    }
+
+    /// One turn of the coil around the rope.
+    private static let turn: CGFloat = 9
 
     private static let colors: [Color] = [
         Color(red: 1.0, green: 0.78, blue: 0.42),  // amber
@@ -221,20 +233,31 @@ struct FairyLights: View {
         TimelineView(.animation(minimumInterval: 1.0 / 20)) { ctx in
             let t = ctx.date.timeIntervalSinceReferenceDate
             Canvas { g, _ in
-                // The lights' own thin wire, twisting around the rope.
+                // The lights' own thin wire, coiled around the rope: seen from the front, a coil is a
+                // wave whose half-turns alternate between in front of the rope and behind it.
                 let wireY: (CGFloat) -> CGFloat = { x in
-                    Layout.ropeY(x, sag: sag, width: width, load: load) + 2.2 * sin(x / 13.5)
+                    Layout.ropeY(x, sag: sag, width: width, load: load) + 2.6 * sin(x / Self.turn)
                 }
+                let inFront: (CGFloat) -> Bool = { x in cos(x / Self.turn) >= 0 }
                 var wire = Path()
                 var wx = Layout.inset + 4
-                wire.move(to: CGPoint(x: wx, y: wireY(wx)))
+                var drawing = false
                 while wx < width - Layout.inset - 4 {
-                    wx += 4
-                    wire.addLine(to: CGPoint(x: wx, y: wireY(wx)))
+                    if inFront(wx) == front {
+                        let pt = CGPoint(x: wx, y: wireY(wx))
+                        if drawing { wire.addLine(to: pt) } else { wire.move(to: pt); drawing = true }
+                    } else {
+                        drawing = false
+                    }
+                    wx += 1.5
                 }
-                g.stroke(wire, with: .color(Color(red: 0.16, green: 0.22, blue: 0.14).opacity(0.85)), lineWidth: 1)
-                let step: CGFloat = 54
-                var x = Layout.inset + 34
+                let wireColor = Color(red: 0.16, green: 0.22, blue: 0.14)
+                g.stroke(wire, with: .color(wireColor.opacity(front ? 0.9 : 0.55)), style: StrokeStyle(lineWidth: 1.1, lineCap: .round))
+                guard front else { return }
+                // One bulb per turn, hanging from the front of the coil.
+                let period = 2 * .pi * Self.turn
+                let step = period
+                var x = (((Layout.inset + 34) / period).rounded(.up)) * period
                 var i = 0
                 while x < width - Layout.inset - 30 {
                     let y = wireY(x) + 7

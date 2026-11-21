@@ -68,8 +68,14 @@ struct LineRoot: View {
             Hook().position(x: Layout.inset, y: (Layout.baseY + 6) / 2)
             Hook().position(x: w - Layout.inset, y: (Layout.baseY + 6) / 2)
             let load = c.ropeLoad(w)
+            let lights = Prefs.shared.fairyLights && Motion.isNight
+            if lights {
+                FairyLights(width: w, sag: c.sag, load: load, front: false)
+                    .frame(width: w, height: Layout.closedHeight)
+                    .transition(.opacity)
+            }
             Rope(sag: c.sag, width: w, dark: scheme == .dark, load: load, phase: c.ropePhase)
-            if Prefs.shared.fairyLights && Motion.isNight {
+            if lights {
                 FairyLights(width: w, sag: c.sag, load: load)
                     .frame(width: w, height: Layout.closedHeight)
                     .transition(.opacity)
