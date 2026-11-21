@@ -94,7 +94,8 @@ struct LineRoot: View {
                     .opacity(c.draggingClip == clip.id && c.dropIndex != nil ? 0 : 1)  // the drag image stands in for it
                     // Above the scrim (zIndex 0), which closes the line when you click it.
                     .zIndex(c.hoveredCard == clip.id ? 10 : 1 - Double(i) * 0.001)
-                    .transition(.asymmetric(insertion: .arrive(arriveStyle(w)), removal: leaveTransition(clip, x: x, w: w)))
+                    .transition(.asymmetric(insertion: .arrive(arriveStyle(w), spot: spot(x, w, total, load)),
+                                            removal: leaveTransition(clip, x: x, w: w, spot: spot(x, w, total, load))))
             }
 
             TabsBar(c: c)
@@ -170,14 +171,18 @@ struct LineRoot: View {
         return .drop
     }
 
-    private func leaveTransition(_ clip: Clip, x: CGFloat, w: CGFloat) -> AnyTransition {
+    private func spot(_ x: CGFloat, _ w: CGFloat, _ total: CGFloat, _ load: RopeLoad) -> CardSpot {
+        CardSpot(peg: CGPoint(x: x, y: Layout.ropeY(x, sag: c.sag, width: w, load: load)), space: CGSize(width: w, height: total))
+    }
+
+    private func leaveTransition(_ clip: Clip, x: CGFloat, w: CGFloat, spot: CardSpot) -> AnyTransition {
         if Motion.reduced { return .leave(.fade) }
-        if let d = c.slideDir { return .leave(.slide(-d * w)) }
+        if let d = c.slideDir { return .leave(.slide(-d * w), spot: spot) }
         let style = c.exitStyle[clip.id] ?? .flutter
         let bx = Layout.basketX(w)
         let by = Layout.ropeY(bx, sag: c.sag, width: w) + 70
         let cy = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH / 2
-        return .leave(style, toBasket: CGSize(width: bx - x, height: by - cy))
+        return .leave(style, toBasket: CGSize(width: bx - x, height: by - cy), spot: spot)
     }
 }
 

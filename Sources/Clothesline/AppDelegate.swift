@@ -72,6 +72,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "demo-pick": for c in line.visible.prefix(3) { line.togglePick(c.id) }
         case "demo-preview": line.pinnedPreview = line.pinnedPreview == nil ? line.visible.dropFirst().first?.id : nil
         case "undo": line.undoDelete()
+        case "dump":
+            // Physics numbers only (no clip contents), for debugging the line.
+            var out = "shown=\(line.shown) visible=\(line.isVisible) sag=\(line.sag) scroll=\(line.scroll) width=\(line.width)\n"
+            out += "dip=\(line.swing.dip) dipX=\(line.swing.dipX) slideDir=\(String(describing: line.slideDir)) exit=\(line.exitStyle.count) pegs=\(line.loosePegs.count) hovered=\(line.hoveredCard != nil)\n"
+            out += "load=\(line.ropeLoad(line.width).points.map { "(\(Int($0.x)),\($0.depth))" })\n"
+            out += line.swing.debug + "\n"
+            for (i, c) in line.visible.enumerated() {
+                out += "\(i) \(c.kind.rawValue) angle=\(line.swing.angle[c.id] ?? 0)\n"
+            }
+            try? out.write(toFile: NSTemporaryDirectory() + "clothesline-dump.txt", atomically: true, encoding: .utf8)
         case "night": Motion.nightOverride = !(Motion.nightOverride ?? false)
         case "demo-copy": if let c = line.visible.dropFirst(2).first { line.copy(c) }
         case "demo-hover": line.hoveredCard = line.hoveredCard == nil ? line.visible.dropFirst(3).first?.id : nil

@@ -66,11 +66,25 @@ enum ArriveStyle: Equatable {
     case fade
 }
 
+/// Where a hanging card is, so its arrival and exit turn around its own peg.
+/// (The transition wraps the already-positioned card, whose frame is the whole line.)
+struct CardSpot: Equatable {
+    var peg: CGPoint = .zero
+    var space: CGSize = CGSize(width: 1, height: 1)
+
+    var pegAnchor: UnitPoint { UnitPoint(x: peg.x / max(1, space.width), y: peg.y / max(1, space.height)) }
+    var cornerAnchor: UnitPoint {
+        UnitPoint(x: (peg.x + Layout.cardW / 2) / max(1, space.width),
+                  y: (peg.y - Layout.pegTop + Layout.viewH) / max(1, space.height))
+    }
+}
+
 struct Leave: ViewModifier, Animatable {
     var p: Double
     let style: LeaveStyle
     /// How far the basket is from the card, for `.basket`.
     let toBasket: CGSize
+    var spot = CardSpot()
 
     var animatableData: Double {
         get { p }
@@ -81,29 +95,30 @@ struct Leave: ViewModifier, Animatable {
         switch style {
         case .flutter:
             let s = sin(p * .pi * 2.4)
+            // Everything is exactly zero at p = 0: that state stays on every card resting on the line.
             content
-                .rotation3DEffect(.degrees(38 * sin(p * .pi * 3)), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-                .rotationEffect(.degrees(26 * sin(p * .pi * 2.4 + 0.6) + 14 * p), anchor: .top)
+                .rotation3DEffect(.degrees(38 * sin(p * .pi * 3)), axis: (x: 0, y: 1, z: 0), anchor: spot.pegAnchor, perspective: 0.5)
+                .rotationEffect(.degrees((26 * sin(p * .pi * 2.4 + 0.6) + 14 * p) * min(1, p * 4)), anchor: spot.pegAnchor)
                 .offset(x: 48 * s, y: 340 * pow(p, 1.6))
                 .opacity(1 - max(0, (p - 0.55) / 0.45))
         case .basket:
             let e = p * p * (3 - 2 * p)
             content
-                .scaleEffect(1 - 0.78 * p, anchor: .top)
-                .rotationEffect(.degrees(50 * p), anchor: .top)
+                .scaleEffect(1 - 0.78 * p, anchor: spot.pegAnchor)
+                .rotationEffect(.degrees(50 * p), anchor: spot.pegAnchor)
                 .offset(x: toBasket.width * e, y: toBasket.height * p - 46 * sin(.pi * p))
                 .opacity(1 - max(0, (p - 0.75) / 0.25))
         case .burn:
             content
-                .rotation3DEffect(.degrees(75 * p), axis: (x: 1, y: -1, z: 0), anchor: .bottomTrailing, perspective: 0.6)
-                .scaleEffect(1 - 0.45 * p, anchor: .bottomTrailing)
+                .rotation3DEffect(.degrees(75 * p), axis: (x: 1, y: -1, z: 0), anchor: spot.cornerAnchor, perspective: 0.6)
+                .scaleEffect(1 - 0.45 * p, anchor: spot.cornerAnchor)
                 .saturation(1 - p)
                 .brightness(-0.25 * p)
                 .blur(radius: 5 * p)
                 .opacity(1 - p)
         case .slide(let dx):
             content
-                .rotationEffect(.degrees(Double(dx > 0 ? -7 : 7) * sin(.pi * p)), anchor: .top)
+                .rotationEffect(.degrees(Double(dx > 0 ? -7 : 7) * sin(.pi * p)), anchor: spot.pegAnchor)
                 .offset(x: dx * p)
         case .fade:
             content.opacity(1 - p)
@@ -114,6 +129,7 @@ struct Leave: ViewModifier, Animatable {
 struct Arrive: ViewModifier, Animatable {
     var p: Double
     let style: ArriveStyle
+    var spot = CardSpot()
 
     var animatableData: Double {
         get { p }
@@ -126,7 +142,7 @@ struct Arrive: ViewModifier, Animatable {
             content.offset(y: -240 * p).opacity(1 - p * 0.6)
         case .slide(let dx):
             content
-                .rotationEffect(.degrees(Double(dx > 0 ? 7 : -7) * sin(.pi * p)), anchor: .top)
+                .rotationEffect(.degrees(Double(dx > 0 ? 7 : -7) * sin(.pi * p)), anchor: spot.pegAnchor)
                 .offset(x: dx * p)
         case .fade:
             content.opacity(1 - p)
@@ -135,9 +151,9 @@ struct Arrive: ViewModifier, Animatable {
 }
 
 extension AnyTransition {
-    static func leave(_ style: LeaveStyle, toBasket: CGSize = .zero) -> AnyTransition {
-        let t = AnyTransition.modifier(active: Leave(p: 1, style: style, toBasket: toBasket),
-                                       identity: Leave(p: 0, style: style, toBasket: toBasket))
+    static func leave(_ style: LeaveStyle, toBasket: CGSize = .zero, spot: CardSpot = CardSpot()) -> AnyTransition {
+        let t = AnyTransition.modifier(active: Leave(p: 1, style: style, toBasket: toBasket, spot: spot),
+                                       identity: Leave(p: 0, style: style, toBasket: toBasket, spot: spot))
         switch style {
         case .flutter: return t.animation(.easeIn(duration: 1.0))
         case .basket: return t.animation(.easeInOut(duration: 0.7))
@@ -146,8 +162,8 @@ extension AnyTransition {
         case .fade: return t.animation(.easeOut(duration: 0.25))
         }
     }
-    static func arrive(_ style: ArriveStyle) -> AnyTransition {
-        .modifier(active: Arrive(p: 1, style: style), identity: Arrive(p: 0, style: style))
+    static func arrive(_ style: ArriveStyle, spot: CardSpot = CardSpot()) -> AnyTransition {
+        .modifier(active: Arrive(p: 1, style: style, spot: spot), identity: Arrive(p: 0, style: style, spot: spot))
     }
 }
 

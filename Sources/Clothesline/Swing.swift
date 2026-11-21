@@ -56,6 +56,8 @@ final class Swing {
         }
     }
 
+    var debug: String { "timer=\(timer != nil) dipActive=\(dipActive) dipV=\(dipV) target=\(dipTarget)@\(dipTargetX) moving=\(angle.count)" }
+
     private func start() {
         guard timer == nil else { return }
         last = Date()
