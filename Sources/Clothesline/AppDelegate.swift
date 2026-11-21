@@ -72,6 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "demo-pick": for c in line.visible.prefix(3) { line.togglePick(c.id) }
         case "demo-preview": line.pinnedPreview = line.pinnedPreview == nil ? line.visible.dropFirst().first?.id : nil
         case "undo": line.undoDelete()
+        case "night": Motion.nightOverride = !(Motion.nightOverride ?? false)
+        case "demo-copy": if let c = line.visible.dropFirst(2).first { line.copy(c) }
+        case "demo-hover": line.hoveredCard = line.hoveredCard == nil ? line.visible.dropFirst(3).first?.id : nil
+        case "demo-age":
+            // Makes the first three Inbox clips look older. Test copies only, never your real clips.
+            guard ProcessInfo.processInfo.environment["CLOTHESLINE_DATA"] != nil else { break }
+            for (n, c) in line.visible.prefix(3).enumerated() {
+                if let i = store.clips.firstIndex(where: { $0.id == c.id }) { store.clips[i].created = Date().addingTimeInterval(-Double(n + 1) * 2 * 86_400) }
+            }
         case "demo-drag":
             if line.dropIndex == nil, let first = line.visible.first {
                 line.draggingClip = first.id
@@ -198,6 +207,9 @@ struct SettingsView: View {
                 Toggle("Rest the pointer at the top edge to show the line", isOn: $prefs.revealOnEdge)
                 Toggle("Peek down when something new is copied", isOn: $prefs.peekOnCopy)
                 Toggle("Peg sound when a clip is hung", isOn: $prefs.pegSound)
+                Toggle("Fairy lights on the line after dark", isOn: $prefs.fairyLights)
+                Text("Cards swing less and the breeze stops when Reduce Motion is on in System Settings → Accessibility.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("Keyboard shortcut", selection: $prefs.shortcut) {
                     ForEach(Shortcut.allCases) { Text($0.label).tag($0) }
                 }

@@ -12,7 +12,35 @@ final class Swing {
     private let damping = 2.1
     private let maxAngle = 0.42
 
+    // The rope dipping under a card: a spring, so it sinks gently and bounces when tugged.
+    private(set) var dipX: CGFloat = 0
+    private(set) var dip: CGFloat = 0
+    @ObservationIgnored private var dipV: CGFloat = 0
+    @ObservationIgnored private var dipTarget: CGFloat = 0
+    @ObservationIgnored private var dipTargetX: CGFloat = 0
+    @ObservationIgnored private var dipActive = false
+
+    /// Rest the rope at `depth` points below normal at `x` (0 lets it spring back).
+    func setDip(x: CGFloat, depth: CGFloat) {
+        guard x != dipTargetX || depth != dipTarget else { return }
+        if dip < 0.3 && dipTarget == 0 { dipX = x }
+        dipTargetX = x
+        dipTarget = depth
+        dipActive = true
+        start()
+    }
+
+    /// Yank the rope down at `x`, as when a card is copied.
+    func tug(x: CGFloat, strength: CGFloat = 110) {
+        if dip < 0.3 && dipTarget == 0 { dipX = x }
+        dipTargetX = x
+        dipV += Motion.reduced ? strength * 0.3 : strength
+        dipActive = true
+        start()
+    }
+
     func kick(_ id: UUID, _ v: Double) {
+        let v = Motion.reduced ? v * 0.3 : v
         velocity[id, default: 0] = max(-6, min(6, velocity[id, default: 0] + v))
         if angle[id] == nil { angle[id] = 0 }
         start()
@@ -58,7 +86,19 @@ final class Swing {
             }
         }
         angle = next
-        if next.isEmpty {
+        if dipActive {
+            dipX += (dipTargetX - dipX) * min(1, CGFloat(dt) * 14)
+            let acc = -170 * (dip - dipTarget) - 10 * dipV
+            dipV += acc * CGFloat(dt)
+            dip = max(-6, dip + dipV * CGFloat(dt))
+            if abs(dip - dipTarget) < 0.05 && abs(dipV) < 0.08 && abs(dipX - dipTargetX) < 0.5 {
+                dip = dipTarget
+                dipV = 0
+                dipX = dipTargetX
+                dipActive = false
+            }
+        }
+        if next.isEmpty && !dipActive {
             timer?.invalidate()
             timer = nil
         }

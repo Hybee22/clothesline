@@ -16,7 +16,9 @@ The idea comes from [Tendedero](https://github.com/alejandrobujan/tendedero), wh
 - **Drop in**: drag files, text or images from other apps onto the line to hang them.
 - **Keyboard** (after ⇧⌘V): ←/→ choose, Return pastes, 1–9 paste by number, Space copies, ⌫ deletes, Tab switches line, type to search, ⌥ previews, Esc closes.
 
-Text, links, colours (`#FF7A59`, `rgb(…)`), images and files each get their own card. A soft peg click plays when a clip is hung (Settings can turn it off).
+Text, links, colours (`#FF7A59`, `rgb(…)`), images and files each get their own card.
+
+It behaves like a real line: the rope dips under the card you point at (and under heavy image cards), a copied card gets a little tug, a breeze stirs the cards now and then, and a fast sweep of the pointer sends a gust along them. Switching lines runs the rope through a pulley, a full Inbox drops its oldest card into the basket, taken-down cards drift off like leaves while their peg pops away, and expired secrets curl up and fade. Clips a few days old look sun-faded with a folded corner, secrets wear a wax seal, and after dark fairy lights come on along the rope (Settings can turn them off). On a Force Touch trackpad, pegs, picks and reorder gaps give a light tick. With Reduce Motion on, swings are smaller, the breeze stops and cards fade instead of flying. A soft peg click plays when a clip is hung (Settings can turn it off).
 
 ## Privacy
 

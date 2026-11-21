@@ -52,6 +52,7 @@ final class Prefs {
     }
     var onboarded: Bool { didSet { d.set(onboarded, forKey: "onboarded") } }
     var pegSound: Bool { didSet { d.set(pegSound, forKey: "pegSound") } }
+    var fairyLights: Bool { didSet { d.set(fairyLights, forKey: "fairyLights") } }
     /// Minutes before a secret-looking Inbox clip is removed; 0 keeps them.
     var secretMinutes: Int { didSet { d.set(secretMinutes, forKey: "secretMinutes") } }
 
@@ -59,7 +60,7 @@ final class Prefs {
         d.register(defaults: [
             "revealOnEdge": true, "peekOnCopy": true, "autoPaste": true,
             "inboxCapacity": 16, "historyLimit": 500, "ignoredApps": defaultIgnoredApps,
-            "pegSound": true, "secretMinutes": 2,
+            "pegSound": true, "secretMinutes": 2, "fairyLights": true,
         ])
         paused = d.bool(forKey: "paused")
         revealOnEdge = d.bool(forKey: "revealOnEdge")
@@ -71,6 +72,7 @@ final class Prefs {
         shortcut = Shortcut(rawValue: d.integer(forKey: "shortcut")) ?? .shiftCmdV
         onboarded = d.bool(forKey: "onboarded")
         pegSound = d.bool(forKey: "pegSound")
+        fairyLights = d.bool(forKey: "fairyLights")
         secretMinutes = d.integer(forKey: "secretMinutes")
     }
 }

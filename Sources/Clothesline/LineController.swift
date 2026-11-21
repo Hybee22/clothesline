@@ -70,6 +70,13 @@ final class LineController {
     var picked: [UUID] = []
     /// While a card is dragged along the line: the gap it would drop into.
     var dropIndex: Int?
+    /// How particular cards leave the line (into the basket, burnt up…). Unset means they flutter away.
+    var exitStyle: [UUID: LeaveStyle] = [:]
+    /// Set while the pulley carries one line out and the next one in (+1 = moving right along the tabs).
+    var slideDir: CGFloat?
+    /// Moves the rope's twist, so the rope itself seems to run through the pulley.
+    var ropePhase: CGFloat = 0
+    var loosePegs: [LoosePeg] = []
     var renamingLine: UUID?
     var draggingClip: UUID?
     var hoveredCard: UUID?
@@ -89,6 +96,10 @@ final class LineController {
     @ObservationIgnored private var pendingDelete: (clip: Clip, index: Int)?
     @ObservationIgnored private var purgeWork: DispatchWorkItem?
     @ObservationIgnored private var lastSecretCheck = Date.distantPast
+    @ObservationIgnored private var nextBreeze = Date().addingTimeInterval(6)
+    @ObservationIgnored private var lastPointer: (x: CGFloat, t: Date)?
+    @ObservationIgnored private var lastGust = Date.distantPast
+    @ObservationIgnored private var phaseTimer: Timer?
 
     init(store: Store) {
         self.store = store
@@ -235,7 +246,11 @@ final class LineController {
             lastSecretCheck = now
             expireSecrets()
         }
-        if panel.isVisible && shown && hideWork == nil { updatePreview(now) }
+        if panel.isVisible && shown && hideWork == nil {
+            updatePreview(now)
+            updateRopeDip()
+            weather(now, pointer: p)
+        }
         let buttons = NSEvent.pressedMouseButtons
         if buttons == 0, draggingClip != nil {
             if let r = releasedAt, now.timeIntervalSince(r) > 0.8 {
@@ -280,6 +295,26 @@ final class LineController {
     // MARK: Actions
 
     func capture(_ clip: Clip) {
+        // A full Inbox: the oldest card slides off the end into the basket as the new one lands.
+        if currentLine == Store.inboxID, panel.isVisible, shown, !Motion.reduced, !store.contains(hash: clip.hash) {
+            let vis = visible
+            if vis.count >= store.inboxCapacity, let last = vis.last {
+                exitStyle[last.id] = .basket
+                DispatchQueue.main.async { [weak self] in
+                    self?.addCaptured(clip)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        self?.swing.kick(Store.inboxID, 2.6)
+                        Haptics.tick()
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self?.exitStyle[last.id] = nil }
+                }
+                return
+            }
+        }
+        addCaptured(clip)
+    }
+
+    private func addCaptured(_ clip: Clip) {
         let wasInbox = currentLine == Store.inboxID
         var added: Clip!
         withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
@@ -310,6 +345,8 @@ final class LineController {
         Paster.write(clip, store: store, plain: plain)
         flash(clip.id)
         swing.kick(clip.id, 1.1)
+        if let x = cardX(clip.id) { swing.tug(x: x) }
+        Haptics.tick()
         if !keyboard { showToast(plain && clip.rich != nil ? "Copied as plain text" : "Copied") }
     }
 
@@ -348,6 +385,24 @@ final class LineController {
     }
 
     func delete(_ clip: Clip) {
+        // First mark how it leaves (and pop its peg), then take it down on the next pass,
+        // so the card has its exit drawn before it goes.
+        if exitStyle[clip.id] == nil, panel.isVisible, shown, let x = cardX(clip.id) {
+            exitStyle[clip.id] = .flutter
+            if !Motion.reduced {
+                let y = Layout.ropeY(x, sag: sag, width: width, load: ropeLoad(width))
+                let peg = LoosePeg(x: x, y: y, hue: store.line(clip.lineID)?.hue)
+                loosePegs.append(peg)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.loosePegs.removeAll { $0.id == peg.id } }
+            }
+            swing.tug(x: x, strength: -60)
+            Haptics.tick()
+            DispatchQueue.main.async { [weak self] in self?.delete(clip) }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            if self?.store.clips.contains(where: { $0.id == clip.id }) == false { self?.exitStyle[clip.id] = nil }
+        }
         finishPendingDelete()
         var removed: (Clip, Int)?
         withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
@@ -369,6 +424,7 @@ final class LineController {
         let c = pd.clip, i = pd.index
         purgeWork?.cancel()
         pendingDelete = nil
+        exitStyle[c.id] = nil
         withAnimation(.spring(response: 0.5, dampingFraction: 0.75)) { store.restore(c, at: i) }
         swing.kick(c.id, 3)
         PegSound.play()
@@ -387,6 +443,7 @@ final class LineController {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             if let i = picked.firstIndex(of: id) { picked.remove(at: i) } else { picked.append(id) }
         }
+        Haptics.tick()
         swing.kick(id, 1.4)
         if !keyboard { panel.makeKey() }
     }
@@ -475,11 +532,17 @@ final class LineController {
                 Paster.watcher?.skipCurrent()
             }
         }
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
-            for c in old { store.delete(c.id) }
-            picked.removeAll { id in old.contains { $0.id == id } }
+        // They curl up and fade rather than flutter away.
+        for c in old { exitStyle[c.id] = .burn }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) {
+                for c in old { self.store.delete(c.id) }
+                self.picked.removeAll { id in old.contains { $0.id == id } }
+            }
+            self.selection = min(self.selection, max(0, self.visible.count - 1))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { for c in old { self.exitStyle[c.id] = nil } }
         }
-        selection = min(selection, max(0, visible.count - 1))
     }
 
     func hang(_ id: UUID, on line: UUID) {
@@ -492,12 +555,109 @@ final class LineController {
 
     func select(line: UUID) {
         guard line != currentLine else { return }
-        withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+        let all = [Store.inboxID] + store.lines.map(\.id)
+        let dir: CGFloat = (all.firstIndex(of: line) ?? 0) > (all.firstIndex(of: currentLine) ?? 0) ? 1 : -1
+        guard panel.isVisible && shown && !Motion.reduced else {
             currentLine = line
             scroll = 0
             selection = 0
+            return
         }
-        swing.ripple(visible.prefix(10).map(\.id), strength: 1.2)
+        // The pulley: this line's cards ride off one end while the next line's ride in from the other.
+        slideDir = dir
+        DispatchQueue.main.async { [self] in
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.9)) {
+                currentLine = line
+                scroll = 0
+                selection = 0
+            }
+            runRope(by: -dir * width * 0.6)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                guard let self else { return }
+                self.swing.ripple(self.visible.prefix(10).map(\.id), strength: 0.9)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in self?.slideDir = nil }
+        }
+    }
+
+    /// Runs the rope's twist along by `distance` over 0.6 s.
+    private func runRope(by distance: CGFloat) {
+        phaseTimer?.invalidate()
+        let start = ropePhase, began = Date()
+        let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                let p = min(1, Date().timeIntervalSince(began) / 0.6)
+                let e = p < 0.5 ? 2 * p * p : 1 - pow(-2 * p + 2, 2) / 2
+                self.ropePhase = start + distance * CGFloat(e)
+                if p >= 1 { timer.invalidate() }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        phaseTimer = t
+    }
+
+    // MARK: Rope and weather
+
+    func cardX(_ id: UUID) -> CGFloat? {
+        visible.firstIndex { $0.id == id }.map { Layout.slotX($0, scroll: scroll, width: width) }
+    }
+
+    /// Where the rope is pulled down: the springy dip under the hovered or tugged card,
+    /// and a little under each image card, which is heavier.
+    func ropeLoad(_ w: CGFloat) -> RopeLoad {
+        var load = RopeLoad()
+        if abs(swing.dip) > 0.05 { load.points.append((swing.dipX, swing.dip)) }
+        for (i, clip) in visible.enumerated() where clip.kind == .image {
+            let x = Layout.slotX(i, scroll: scroll, width: w)
+            if x > 0 && x < w { load.points.append((x, 5 * Layout.fade(x, width: w))) }
+        }
+        return load
+    }
+
+    private func updateRopeDip() {
+        if draggingClip == nil, let h = hoveredCard, let x = cardX(h) {
+            swing.setDip(x: x, depth: 8)
+        } else {
+            swing.setDip(x: swing.dipX, depth: 0)
+        }
+    }
+
+    /// A breeze now and then, and a gust when the pointer sweeps fast across the line.
+    private func weather(_ now: Date, pointer p: NSPoint) {
+        guard !Motion.reduced, draggingClip == nil else { return }
+        let cards = visible.enumerated().filter { i, _ in
+            let x = Layout.slotX(i, scroll: scroll, width: width)
+            return x > -Layout.cardW && x < width + Layout.cardW
+        }
+        if now > nextBreeze {
+            nextBreeze = now.addingTimeInterval(.random(in: 7...14))
+            let dir: Double = Bool.random() ? 1 : -1
+            let strength = Double.random(in: 0.25...0.5)
+            let ordered = dir > 0 ? cards : cards.reversed()
+            for (n, (_, clip)) in ordered.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(n) * 0.09) { [weak self] in
+                    self?.swing.kick(clip.id, dir * strength * Double.random(in: 0.7...1.2))
+                }
+            }
+        }
+        let local = p.x - (panel.frame.minX)
+        defer { lastPointer = (local, now) }
+        guard let last = lastPointer, NSMouseInRect(p, panel.frame, false) else { return }
+        let dt = now.timeIntervalSince(last.t)
+        guard dt > 0, dt < 0.1 else { return }
+        let vx = (local - last.x) / CGFloat(dt)
+        guard abs(vx) > 3200, now.timeIntervalSince(lastGust) > 1.5 else { return }
+        lastGust = now
+        // A gust, not a gale: enough to stir the cards, never to throw them around.
+        let strength = min(0.9, Double(abs(vx)) / 5000)
+        for (i, clip) in cards {
+            let x = Layout.slotX(i, scroll: scroll, width: width)
+            let delay = Double(abs(x - local)) / 2200
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.swing.kick(clip.id, (vx > 0 ? -1 : 1) * strength * Double.random(in: 0.8...1.1))
+            }
+        }
     }
 
     func cycleLine(_ step: Int) {

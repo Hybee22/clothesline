@@ -129,6 +129,7 @@ enum PegSound {
     }()
 
     static func play() {
+        Haptics.thump()
         guard Prefs.shared.pegSound, let s = sound else { return }
         if s.isPlaying { s.stop() }
         s.play()

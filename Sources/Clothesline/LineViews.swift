@@ -26,15 +26,18 @@ enum Layout {
     }
     static func firstVisible(_ scroll: CGFloat) -> Int { max(0, Int((scroll / spacing - 0.02).rounded(.up))) }
 
-    static func ropeY(_ x: CGFloat, sag: CGFloat, width: CGFloat) -> CGFloat {
+    static func ropeY(_ x: CGFloat, sag: CGFloat, width: CGFloat, load: RopeLoad = .flat) -> CGFloat {
         let l = inset, r = width - inset
         let t = min(max((x - l) / (r - l), 0), 1)
-        return baseY + sag * 4 * t * (1 - t)
+        // The load fades out towards the hooks, where the rope is held tight.
+        let hold = min(1, 6 * t * (1 - t))
+        return baseY + sag * 4 * t * (1 - t) + load.offset(x) * hold
     }
-    static func ropeSlope(_ x: CGFloat, sag: CGFloat, width: CGFloat) -> CGFloat {
+    static func ropeSlope(_ x: CGFloat, sag: CGFloat, width: CGFloat, load: RopeLoad = .flat) -> CGFloat {
         let l = inset, r = width - inset
         let t = min(max((x - l) / (r - l), 0), 1)
-        return sag * 4 * (1 - 2 * t) / (r - l)
+        let hold = min(1, 6 * t * (1 - t))
+        return sag * 4 * (1 - 2 * t) / (r - l) + load.slope(x) * hold
     }
     static func fade(_ x: CGFloat, width: CGFloat) -> Double {
         let lo = slotStart - spacing * 0.8, hi = slotEnd(width) + spacing * 0.8
@@ -64,7 +67,15 @@ struct LineRoot: View {
 
             Hook().position(x: Layout.inset, y: (Layout.baseY + 6) / 2)
             Hook().position(x: w - Layout.inset, y: (Layout.baseY + 6) / 2)
-            Rope(sag: c.sag, width: w, dark: scheme == .dark)
+            let load = c.ropeLoad(w)
+            Rope(sag: c.sag, width: w, dark: scheme == .dark, load: load, phase: c.ropePhase)
+            if Prefs.shared.fairyLights && Motion.isNight {
+                FairyLights(width: w, sag: c.sag, load: load)
+                    .frame(width: w, height: Layout.closedHeight)
+                    .transition(.opacity)
+                    .zIndex(0.5)
+            }
+            ForEach(c.loosePegs) { LoosePegView(peg: $0).zIndex(12) }
 
             BasketHanger(c: c, width: w)
                 .zIndex(5)
@@ -78,14 +89,12 @@ struct LineRoot: View {
             ForEach(Array(clips.enumerated()), id: \.element.id) { i, clip in
                 let x = Layout.slotX(i, scroll: c.scroll, width: w) + gapShift(i, clips)
                 let badge = c.keyboard && i >= first && i < first + 9 ? i - first + 1 : nil
-                CardView(clip: clip, index: i, badge: badge, c: c)
-                    .modifier(Hang(x: x, sag: c.sag, width: w, angle: c.swing.angle[clip.id] ?? 0))
+                CardView(clip: clip, index: i, badge: badge, pegless: c.exitStyle[clip.id] == .flutter, c: c)
+                    .modifier(Hang(x: x, sag: c.sag, width: w, angle: c.swing.angle[clip.id] ?? 0, load: load))
                     .opacity(c.draggingClip == clip.id && c.dropIndex != nil ? 0 : 1)  // the drag image stands in for it
                     // Above the scrim (zIndex 0), which closes the line when you click it.
                     .zIndex(c.hoveredCard == clip.id ? 10 : 1 - Double(i) * 0.001)
-                    .transition(.asymmetric(
-                        insertion: .modifier(active: DropIn(p: 1), identity: DropIn(p: 0)),
-                        removal: .modifier(active: Fall(p: 1), identity: Fall(p: 0))))
+                    .transition(.asymmetric(insertion: .arrive(arriveStyle(w)), removal: leaveTransition(clip, x: x, w: w)))
             }
 
             TabsBar(c: c)
@@ -138,12 +147,37 @@ struct LineRoot: View {
 
     private func scrim(_ w: CGFloat) -> some View {
         let dark = scheme == .dark
+        // After dark, with the lights on, the shade warms up a little.
+        let night = Prefs.shared.fairyLights && Motion.isNight
+        let top: Color = night ? Color(red: 0.10, green: 0.05, blue: 0.0) : .black
         return LinearGradient(stops: [
-            .init(color: .black.opacity(dark ? 0.62 : 0.42), location: 0),
-            .init(color: .black.opacity(dark ? 0.42 : 0.26), location: 0.6),
-            .init(color: .black.opacity(0), location: 1),
+            .init(color: top.opacity(dark ? 0.62 : 0.42), location: 0),
+            .init(color: top.opacity(dark ? 0.42 : 0.26), location: 0.6),
+            .init(color: top.opacity(0), location: 1),
         ], startPoint: .top, endPoint: .bottom)
+        .overlay {
+            if night {
+                RadialGradient(colors: [Color(red: 1, green: 0.7, blue: 0.35).opacity(0.10), .clear],
+                               center: UnitPoint(x: 0.5, y: 0.1), startRadius: 0, endRadius: w * 0.5)
+            }
+        }
         .frame(width: w, height: Layout.closedHeight + (c.drawerOpen ? Layout.drawerHeight * 0.6 : 0))
+    }
+
+    private func arriveStyle(_ w: CGFloat) -> ArriveStyle {
+        if Motion.reduced { return .fade }
+        if let d = c.slideDir { return .slide(d * w) }
+        return .drop
+    }
+
+    private func leaveTransition(_ clip: Clip, x: CGFloat, w: CGFloat) -> AnyTransition {
+        if Motion.reduced { return .leave(.fade) }
+        if let d = c.slideDir { return .leave(.slide(-d * w)) }
+        let style = c.exitStyle[clip.id] ?? .flutter
+        let bx = Layout.basketX(w)
+        let by = Layout.ropeY(bx, sag: c.sag, width: w) + 70
+        let cy = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH / 2
+        return .leave(style, toBasket: CGSize(width: bx - x, height: by - cy))
     }
 }
 
@@ -153,6 +187,7 @@ struct Hang: ViewModifier, Animatable {
     var sag: CGFloat
     let width: CGFloat
     let angle: Double
+    var load: RopeLoad = .flat
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
         get { AnimatablePair(x, sag) }
@@ -160,8 +195,8 @@ struct Hang: ViewModifier, Animatable {
     }
 
     func body(content: Content) -> some View {
-        let y = Layout.ropeY(x, sag: sag, width: width)
-        let tilt = Double(atan(Layout.ropeSlope(x, sag: sag, width: width))) * 0.6
+        let y = Layout.ropeY(x, sag: sag, width: width, load: load)
+        let tilt = Double(atan(Layout.ropeSlope(x, sag: sag, width: width, load: load))) * 0.6
         let fade = Layout.fade(x, width: width)
         content
             .frame(width: Layout.cardW, height: Layout.viewH, alignment: .top)
@@ -181,7 +216,10 @@ struct LineDrop: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? {
         if let d = c.draggingClip, info.location.y < Layout.closedHeight {
             let g = c.gapIndex(atX: info.location.x, dragging: d)
-            if g != c.dropIndex { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { c.dropIndex = g } }
+            if g != c.dropIndex {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { c.dropIndex = g }
+                Haptics.tick()
+            }
         }
         return DropProposal(operation: c.draggingClip != nil ? .move : .copy)
     }
@@ -212,7 +250,7 @@ struct PreviewLayer: View {
             Color.clear
             if c.shown, let id = c.previewID, let i = clips.firstIndex(where: { $0.id == id }) {
                 let x = Layout.slotX(i, scroll: c.scroll, width: w)
-                let top = Layout.ropeY(x, sag: c.sag, width: w) - Layout.pegTop + Layout.viewH + 4
+                let top = Layout.ropeY(x, sag: c.sag, width: w, load: c.ropeLoad(w)) - Layout.pegTop + Layout.viewH + 4
                 PreviewCard(clip: clips[i], store: c.store)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: Layout.previewW, height: Layout.previewRoom - 14, alignment: .top)
@@ -258,6 +296,7 @@ struct Fall: ViewModifier {
 struct RopeShape: Shape {
     var sag: CGFloat
     let width: CGFloat
+    var load: RopeLoad = .flat
     var animatableData: CGFloat {
         get { sag }
         set { sag = newValue }
@@ -266,7 +305,16 @@ struct RopeShape: Shape {
         var p = Path()
         let l = Layout.inset, r = width - Layout.inset
         p.move(to: CGPoint(x: l, y: Layout.baseY))
-        p.addQuadCurve(to: CGPoint(x: r, y: Layout.baseY), control: CGPoint(x: (l + r) / 2, y: Layout.baseY + 2 * sag))
+        if load.points.allSatisfy({ abs($0.depth) < 0.05 }) {
+            p.addQuadCurve(to: CGPoint(x: r, y: Layout.baseY), control: CGPoint(x: (l + r) / 2, y: Layout.baseY + 2 * sag))
+            return p
+        }
+        var x = l + 6
+        while x < r {
+            p.addLine(to: CGPoint(x: x, y: Layout.ropeY(x, sag: sag, width: width, load: load)))
+            x += 6
+        }
+        p.addLine(to: CGPoint(x: r, y: Layout.baseY))
         return p
     }
 }
@@ -275,19 +323,22 @@ struct Rope: View {
     let sag: CGFloat
     let width: CGFloat
     let dark: Bool
+    var load: RopeLoad = .flat
+    /// Moves the twist along the rope, as when the pulley carries a new line in.
+    var phase: CGFloat = 0
 
     var body: some View {
         let twine = dark ? Color(red: 0.80, green: 0.72, blue: 0.60) : Color(red: 0.90, green: 0.83, blue: 0.70)
         let twist = dark ? Color(red: 0.52, green: 0.44, blue: 0.34) : Color(red: 0.62, green: 0.52, blue: 0.40)
         ZStack {
-            RopeShape(sag: sag, width: width)
+            RopeShape(sag: sag, width: width, load: load)
                 .stroke(Color.black.opacity(0.32), style: StrokeStyle(lineWidth: 3, lineCap: .round))
                 .offset(y: 4).blur(radius: 2.5)
-            RopeShape(sag: sag, width: width)
+            RopeShape(sag: sag, width: width, load: load)
                 .stroke(twine, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-            RopeShape(sag: sag, width: width)
-                .stroke(twist.opacity(0.75), style: StrokeStyle(lineWidth: 3, lineCap: .butt, dash: [1.4, 2.6]))
-            RopeShape(sag: sag, width: width)
+            RopeShape(sag: sag, width: width, load: load)
+                .stroke(twist.opacity(0.75), style: StrokeStyle(lineWidth: 3, lineCap: .butt, dash: [1.4, 2.6], dashPhase: -phase))
+            RopeShape(sag: sag, width: width, load: load)
                 .stroke(Color.white.opacity(0.45), style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
                 .offset(y: -0.7)
         }
@@ -350,6 +401,7 @@ struct CardView: View {
     let clip: Clip
     let index: Int
     let badge: Int?
+    var pegless = false
     @Bindable var c: LineController
     @State private var lastX: CGFloat?
 
@@ -409,6 +461,7 @@ struct CardView: View {
                 .scaleEffect(hover ? 1.04 : 1, anchor: .top)
                 .padding(.top, Layout.cardTop)
             Peg(hue: c.store.line(clip.lineID)?.hue, open: hover)
+                .opacity(pegless ? 0 : 1)  // it pops off on its own (LoosePeg)
         }
         .frame(width: Layout.cardW, height: Layout.viewH, alignment: .top)
         .contentShape(Rectangle())
@@ -462,6 +515,10 @@ struct CardFace: View {
                                startPoint: .top, endPoint: .bottom),
                 lineWidth: 1)
         )
+        .mask(DogEarMask(fold: dogEar))
+        .overlay(alignment: .bottomTrailing) {
+            if dogEar > 0 { DogEarFlap(fold: dogEar, dark: scheme == .dark) }
+        }
         .shadow(color: .black.opacity(lifted ? 0.38 : 0.28), radius: lifted ? 18 : 10, y: lifted ? 12 : 7)
     }
 
@@ -472,6 +529,12 @@ struct CardFace: View {
             LinearGradient(colors: dark ? [Color(white: 0.23), Color(white: 0.16)] : [Color(white: 1.0), Color(white: 0.93)],
                            startPoint: .top, endPoint: .bottom)
             LinearGradient(colors: [tint.opacity(dark ? 0.16 : 0.10), .clear], startPoint: .top, endPoint: .center)
+            // Older clips look a little sun-faded.
+            if ageDays > 0.5 {
+                Color(red: 0.82, green: 0.64, blue: 0.32)
+                    .opacity(min(dark ? 0.12 : 0.2, 0.045 * ageDays))
+                    .blendMode(dark ? .overlay : .multiply)
+            }
             VStack(alignment: .leading, spacing: compact ? 5 : 7) {
                 header(color: tint)
                 content
@@ -484,6 +547,13 @@ struct CardFace: View {
             .padding(compact ? 10 : 12)
             .padding(.top, compact ? 0 : 6)
         }
+    }
+
+    private var ageDays: Double { Date().timeIntervalSince(clip.created) / 86_400 }
+    /// Clips two or more days old get a folded corner.
+    private var dogEar: CGFloat {
+        guard clip.kind == .text || clip.kind == .link || clip.kind == .files, !clip.isSecret, ageDays >= 2 else { return 0 }
+        return compact ? 11 : 15
     }
 
     @ViewBuilder private var content: some View {
@@ -620,6 +690,10 @@ struct CardFace: View {
             }
             .padding(compact ? 10 : 12)
             .padding(.top, compact ? 0 : 6)
+            WaxSeal()
+                .scaleEffect(compact ? 0.8 : 1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(compact ? 4 : 8)
         }
     }
 
@@ -798,7 +872,7 @@ struct BasketHanger: View {
 
     var body: some View {
         let bx = Layout.basketX(width)
-        let ry = Layout.ropeY(bx, sag: c.sag, width: width)
+        let ry = Layout.ropeY(bx, sag: c.sag, width: width, load: c.ropeLoad(width))
         let top = ry + 40
         ZStack(alignment: .topLeading) {
             Path { p in
@@ -871,6 +945,8 @@ struct BasketView: View {
                 .offset(y: 20)
             if count > 0 {
                 Text("\(count)")
+                    .contentTransition(.numericText())
+                    .animation(.spring(response: 0.35, dampingFraction: 0.7), value: count)
                     .font(.system(size: 10.5, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 6).padding(.vertical, 1.5)
